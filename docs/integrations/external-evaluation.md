@@ -118,7 +118,7 @@ framework with no pull-friendly API, or a one-off backfill — push results
 directly:
 
 ```bash
-POST /v1/semantic-signals/external
+POST /v1/semantic-signals
 Authorization: Bearer dt_live_...
 Content-Type: application/json
 

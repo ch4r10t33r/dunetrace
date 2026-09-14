@@ -23,7 +23,12 @@ docker compose up -d --force-recreate alerts
 
 Each Slack alert includes: failure type, severity, confidence, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, a one-line rate context summary showing how common this pattern is for the agent, and a **View Run** button that deep-links directly to that run's detail panel in the dashboard.
 
-Three action buttons let you respond directly from Slack:
+Three action buttons let you respond directly from Slack. They require
+`SLACK_SIGNING_SECRET` (Slack App Settings → Basic Information): the callback
+route carries no API key and reads its target org from the payload, so the
+Slack signature is the only credential on it. With the secret unset, clicks are
+refused with 403 outside `AUTH_MODE=dev` — an alert delivered through an
+incoming webhook needs no signing secret, so this is easy to miss.
 
 - **Mark resolved** — sets `resolved_at` on the signal.
 - **Not a problem** — records a false positive (`agent_detector_overrides`); after 3 false positives for the same `(agent_id, failure_type)`, that detector is silenced for that agent until manually reset.

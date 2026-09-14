@@ -36,10 +36,17 @@ The Dunetrace MCP server exposes agent signals as tools an MCP-capable client ca
 
 ```bash
 cd packages/mcp-server && pip install -e .
-dunetrace-mcp --sse --port 8000
+dunetrace-mcp --sse --port 8000            # binds 127.0.0.1 only
 ```
 
-Add the server URL (`http://your-dunetrace-host:8000/sse`) under Langdock's "External tools"/"MCP servers" workspace setting. Available tools: `list_agents`, `get_agent_signals`, `get_agent_health`, `get_agent_patterns`, `get_run_detail`, `search_signals`, `summarize_agent`, `get_instrumentation_guide`.
+Langdock is a hosted service, so it cannot reach a loopback port. The SSE
+server has **no authentication of its own** — see the warning in
+[docs/mcp-server.md](mcp-server.md#codex--sse-clients) — so do not simply bind
+it to `0.0.0.0`. Put an authenticating reverse proxy in front of it, keep
+`dunetrace-mcp` on loopback behind that proxy, and give Langdock the proxy's
+URL (ending in `/sse`) under its "External tools"/"MCP servers" workspace
+setting. Leave `DUNETRACE_MCP_READONLY` at its default (`true`) unless you
+intend a hosted assistant to be able to write policies. Available tools: `list_agents`, `get_agent_signals`, `get_agent_health`, `get_agent_patterns`, `get_run_detail`, `search_signals`, `summarize_agent`, `get_instrumentation_guide`.
 
 ### Troubleshooting
 

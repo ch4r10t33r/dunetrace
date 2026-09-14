@@ -65,6 +65,8 @@ docker compose -f docker-compose.ghcr.yml up -d
 pip install -r requirements.txt
 ```
 
+This runs everything on `localhost` with authentication off. To put it on a server → [Deploying](docs/operations.md#deploying).
+
 **2. Install the SDK**
 ```bash
 pip install dunetrace                       # Python
@@ -247,19 +249,10 @@ pip install dunetrace-mcp
 
 ## Architecture
 
-```
-Agent Code
-  └─► Dunetrace SDK        (raw content → ingest events)
-        └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector          (poll → 34 detectors → signals)
-                ├─► Semantic Worker   (optional — poll → DeepEval → signals)
-                ├─► Integrations      (optional — pull Langfuse/LangSmith/Braintrust)
-                ├─► Alerts            (poll → explain → Slack / webhook)
-                └─► Customer API      (runs, signals, explanations → dashboard)
-```
+Services share one Postgres and no message broker: the SDK ships events to the ingest API, and each worker polls for what it needs next. The core pipeline runs with no LLM key; three workers are opt-in.
 
-→ [docs/architecture.md](docs/architecture.md) for the full service breakdown
-· [operations guide](docs/operations.md) (retention, rate limiting, quotas)
+→ [docs/architecture.md](docs/architecture.md) — services, data flow, detection paths, schema
+· [docs/operations.md](docs/operations.md) — deploying, probes and metrics, retention, redaction, rate limiting
 
 ---
 
