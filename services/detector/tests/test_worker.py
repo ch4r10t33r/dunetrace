@@ -849,7 +849,7 @@ class TestHandoffContextLossWiring(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(p.stop)
 
     def _run_with_fetch(self, events_by_run: dict):
-        async def fetch_side_effect(run_id):
+        async def fetch_side_effect(run_id, org_id):
             return events_by_run.get(run_id, [])
 
         return AsyncMock(side_effect=fetch_side_effect)
@@ -925,7 +925,9 @@ class TestHandoffContextLossWiring(unittest.IsolatedAsyncioTestCase):
             await process_run("run-child", "billing-agent", "v1", "completed", "org-1")
 
         # Only the child's own run_id should ever have been fetched.
-        fetch_mock.assert_awaited_once_with("run-child")
+        # (run_id, org_id): the events read is org-scoped so a colliding
+        # run_id from another tenant cannot join this run's event stream.
+        fetch_mock.assert_awaited_once_with("run-child", "org-1")
 
     async def test_no_handoff_signal_when_parent_events_missing(self):
         child_events = [

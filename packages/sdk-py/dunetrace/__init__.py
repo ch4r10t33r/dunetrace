@@ -2,6 +2,7 @@ from dunetrace.client import Dunetrace, DunetraceClient
 from dunetrace.context import get_current_run
 from dunetrace.emitters import (
     BatchingEmitter,
+    ShipOutcome,
     HttpBatchingEmitter,
     NoopBatchingEmitter,
     ConsoleBatchingEmitter,
@@ -24,6 +25,7 @@ from dunetrace.detectors import (
     PROMPT_INJECTION_DETECTOR,
 )
 from dunetrace.policies import ApprovalDenied, Policy, PolicyConfigError, PolicyViolation
+from dunetrace.redaction import DEFAULT_DENYLIST, DEFAULT_MAX_FIELD_CHARS, redact_dict
 from dunetrace.risk_engine import RiskEngine
 
 from importlib.metadata import version, PackageNotFoundError
@@ -50,10 +52,14 @@ __all__ = [
     "PolicyConfigError",
     "ApprovalDenied",
     "RiskEngine",
+    "DEFAULT_DENYLIST",
+    "DEFAULT_MAX_FIELD_CHARS",
+    "redact_dict",
     "RiskScore",
     "Exporter",
     "CallableExporter",
     "BatchingEmitter",
+    "ShipOutcome",
     "HttpBatchingEmitter",
     "NoopBatchingEmitter",
     "ConsoleBatchingEmitter",

@@ -14,6 +14,7 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from api_svc.config import settings
 from api_svc.routers.slack import slack_callback
 
 
@@ -193,3 +194,60 @@ class TestSlackApprovalActions(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSignatureIsRequiredOutsideDev(unittest.IsolatedAsyncioTestCase):
+    """The route is mounted with no API-key dependency and writes approval
+    decisions against an org_id taken from the caller's own payload, so the
+    Slack signature is the only credential. A missing secret must fail closed.
+
+    It used to fall through to "skip verification" whenever the secret was
+    empty — which is the default, and the normal state for an install that
+    delivers alerts through an incoming webhook (those need no signing
+    secret). That left cross-tenant approval writes open to an anonymous POST
+    in AUTH_MODE=prod.
+    """
+
+    @staticmethod
+    def _request():
+        return _FakeRequest(
+            _slack_form_body("approve_request", {"approval_id": 7, "org_id": "victim-org"})
+        )
+
+    async def test_no_secret_in_prod_is_refused_and_writes_nothing(self):
+        decide = AsyncMock()
+        with (
+            patch.object(settings, "SLACK_SIGNING_SECRET", ""),
+            patch.object(settings, "AUTH_MODE", "prod"),
+            patch("api_svc.routers.slack.set_approval_decision", decide),
+        ):
+            resp = await slack_callback(self._request())
+        self.assertEqual(resp.status_code, 403)
+        decide.assert_not_awaited()
+
+    async def test_no_secret_in_dev_still_works(self):
+        """Local development keeps working without a Slack app configured."""
+        decide = AsyncMock(return_value={"status": "granted"})
+        with (
+            patch.object(settings, "SLACK_SIGNING_SECRET", ""),
+            patch.object(settings, "AUTH_MODE", "dev"),
+            patch("api_svc.routers.slack.set_approval_decision", decide),
+        ):
+            resp = await slack_callback(self._request())
+        self.assertEqual(resp.status_code, 200)
+        decide.assert_awaited()
+
+    async def test_bad_signature_is_refused_when_a_secret_is_set(self):
+        decide = AsyncMock()
+        req = _FakeRequest(
+            _slack_form_body("approve_request", {"approval_id": 7, "org_id": "victim-org"}),
+            headers={"X-Slack-Request-Timestamp": "1", "X-Slack-Signature": "v0=nope"},
+        )
+        with (
+            patch.object(settings, "SLACK_SIGNING_SECRET", "s3cret"),
+            patch.object(settings, "AUTH_MODE", "prod"),
+            patch("api_svc.routers.slack.set_approval_decision", decide),
+        ):
+            resp = await slack_callback(req)
+        self.assertEqual(resp.status_code, 403)
+        decide.assert_not_awaited()

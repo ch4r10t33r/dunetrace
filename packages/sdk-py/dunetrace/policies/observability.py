@@ -55,6 +55,19 @@ class PolicyEvaluationRecord:
     reason: str = ""
     sampled: bool = False  # True if emitted under beyond-limit sampling
     ts: float = 0.0
+    # Freshness of the remote policy bundle this evaluation ran against.
+    # stale=True means remote fetching is configured but either no fetch has
+    # ever succeeded for this agent or a refresh is overdue — i.e. the
+    # dashboard's policies may not be what is being enforced right now.
+    # age_s is seconds since the last successful load, None if never.
+    policy_bundle_stale: bool = False
+    policy_bundle_age_s: Optional[float] = None
+    # Same verdict for the detector configuration the in-path signal pass ran
+    # with (GET /v1/detector-config): stale=True means the thresholds/packs/
+    # baselines in use are the SDK's class defaults or an overdue copy, not
+    # what the detector worker is applying right now.
+    detector_config_stale: bool = False
+    detector_config_age_s: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,6 +82,10 @@ class PolicyEvaluationRecord:
             "reason": self.reason,
             "sampled": self.sampled,
             "ts": self.ts,
+            "policy_bundle_stale": self.policy_bundle_stale,
+            "policy_bundle_age_s": self.policy_bundle_age_s,
+            "detector_config_stale": self.detector_config_stale,
+            "detector_config_age_s": self.detector_config_age_s,
         }
 
 

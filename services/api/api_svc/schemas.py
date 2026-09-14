@@ -211,9 +211,22 @@ if _PYDANTIC:
         page: Page
 
     class HealthResponse(_Model):
+        """GET /health — liveness. No dependency state by design; see
+        ReadyResponse for that."""
+
+        status: str = "ok"
+        version: str = "0.5.0"
+
+    class ReadyResponse(_Model):
+        """GET /ready — readiness, not liveness: 503 body when the DB or the
+        shared schema is not usable. Mirrors dunetrace_schemas.metrics.db_ready."""
+
         status: str = "ok"
         version: str = "0.5.0"
         db: str = "unknown"
+        schema_version: Optional[int] = None
+        required: int = 0
+        pool: Optional[Dict[str, Any]] = None
 
     # Insights models
 
@@ -370,7 +383,20 @@ if _PYDANTIC:
         manually_resolved: bool = False
         affected_runs: List[AffectedRun] = []
         root_cause: Optional[str] = None
+        # Free text, always. A `dunetrace_native` fix is a runtime policy, not
+        # prose, so it arrives here as a human-readable summary of the policy
+        # and machine-readable in `suggested_policy` below — never as a
+        # stringified dict, and never as a dict (which used to 500 this route
+        # on every TOOL_LOOP / RETRY_STORM / CASCADING_TOOL_FAILURE /
+        # STEP_COUNT_INFLATION issue whenever an LLM key was configured).
         suggested_fix: Optional[str] = None
+        # PolicyCreate-shaped body (see routers/policies.py) for a
+        # `dunetrace_native` fix — POST it to /v1/policies unchanged. None for
+        # `customer_code` fixes, which only ever produce a diff.
+        suggested_policy: Optional[Dict[str, Any]] = None
+        # Which of the two fix paths this issue is on: "dunetrace_native" |
+        # "customer_code". None when no root-cause analysis ran.
+        fix_category: Optional[str] = None
         # Phase 4.3 (not yet built) will populate this — always empty for now.
         # See BACKLOG.md's Phase 4.2 entry.
         code_references: List[str] = []
@@ -811,7 +837,15 @@ else:
     class HealthResponse:
         status: str = "ok"
         version: str = "0.5.0"
+
+    @dataclass
+    class ReadyResponse:
+        status: str = "ok"
+        version: str = "0.5.0"
         db: str = "unknown"
+        schema_version: Optional[int] = None
+        required: int = 0
+        pool: Optional[Dict[str, Any]] = None
 
     @dataclass
     class FailureRatePoint:

@@ -69,7 +69,21 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Literal, Optional, Required, TypedDict, cast
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    List,
+    Literal,
+    Optional,
+    Required,
+    Set,
+    Tuple,
+    TypedDict,
+    cast,
+)
+
+from dunetrace.remote_fetch import RemoteFetchState
 
 # Expression-based conditions (condition.match). Parser + immutable tree; the
 # evaluator lands in Phase 2. Re-exported here so callers keep importing from
@@ -669,18 +683,20 @@ def _verify_policy_signature(policy: dict, secret: str) -> bool:
 # ── Engine ────────────────────────────────────────────────────────────────────
 
 
-class PolicyEngine:
+class PolicyEngine(RemoteFetchState):
     """
     Thread-safe policy evaluator. One instance lives on the Dunetrace client
     and is shared across all concurrent runs.
+
+    The remote-fetch bookkeeping (needs_fetch / begin_fetch / mark_fetched /
+    mark_fetch_failed / end_fetch / bundle_status, the 60s TTL and the
+    2s→15s failure backoff) is inherited from ``RemoteFetchState`` and shared
+    with the detector-config store, so the two refreshes cannot drift.
     """
 
-    _FETCH_TTL = 60.0  # seconds between remote refreshes per agent_id
-
     def __init__(self) -> None:
+        super().__init__()  # _lock, _fetch_times, _fetch_failures, _fetch_in_flight
         self._policies: List[Policy] = []
-        self._lock: threading.Lock = threading.Lock()
-        self._fetch_times: Dict[str, float] = {}  # agent_id → last fetch monotonic
         # Remote policies keyed by the agent_id they were fetched FOR, not by
         # the agent_id on the policy — a wildcard ("*") policy comes back on
         # every agent's fetch and so appears under several keys. Keeping them
@@ -799,14 +815,10 @@ class PolicyEngine:
             len(self._remote_by_agent),
         )
 
-    def mark_fetched(self, agent_id: str) -> None:
-        self._fetch_times[agent_id] = time.monotonic()
-
-    def needs_fetch(self, agent_id: str) -> bool:
-        last = self._fetch_times.get(agent_id)
-        if last is None:
-            return True
-        return (time.monotonic() - last) > self._FETCH_TTL
+    def has_remote_bundle(self, agent_id: str) -> bool:
+        """True once any remote load (network or cache) has run for ``agent_id``."""
+        with self._lock:
+            return agent_id in self._remote_by_agent
 
     def __len__(self) -> int:
         with self._lock:

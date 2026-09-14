@@ -602,6 +602,36 @@ async def open_pr(
             ),
         )
 
+    # This endpoint serves customer_code / code_change fixes ONLY, which is what
+    # the explain response, fix_classification's module docstring and the docs
+    # all say. Nothing enforced it: the dashboard gated the button client-side
+    # and the server accepted anything. So a caller could open a PR for a
+    # dunetrace_native signal (whose fix is a runtime policy applied through
+    # POST /v1/policies, not a diff) or for a prompt_addition one (which
+    # explain returns with apply_blocked: true precisely because no automated
+    # apply path exists) — and _attempt_real_diff below would then resolve a
+    # real source file and commit LLM-generated content into the customer's
+    # repository on the strength of a caller-supplied root_cause/fix_content.
+    if classify_fix(signal) == "dunetrace_native":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This signal's fix is a runtime policy, not a code change. Apply "
+                "it with POST /v1/policies using the suggested_policy body from "
+                "POST /v1/signals/{id}/explain — there is no PR to open."
+            ),
+        )
+    if signal["failure_type"] not in _CODE_CHANGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Opening a PR is only supported for code_change fixes. This "
+                f"signal's fix type is prompt_addition ({signal['failure_type']}): "
+                "Dunetrace can read the system prompt but has no write access to "
+                "wherever it lives, so the fix has to be copied in manually."
+            ),
+        )
+
     real_file = await _attempt_real_diff(
         org_id, signal["agent_id"], auth["token"], auth["repos"], body.root_cause, body.fix_content
     )

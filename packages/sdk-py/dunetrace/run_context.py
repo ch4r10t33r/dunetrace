@@ -11,7 +11,7 @@ import os
 import time
 import uuid
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 from dunetrace.models import (
     AgentEvent,
@@ -24,6 +24,7 @@ from dunetrace.models import (
     ToolCall,
 )
 import logging
+from dunetrace.detector_config import DetectorConfigStore
 from dunetrace.policies import (
     ApprovalDenied,
     EvaluationContext,
@@ -34,8 +35,154 @@ from dunetrace.policies import (
     compute_run_cost,
     eval_logger,
 )
+from dunetrace.redaction import (
+    DEFAULT_MAX_FIELD_CHARS,
+    _safe_str,
+    cap_text,
+    put_capped,
+    redact_dict,
+    serialize_capped,
+)
 
 logger = logging.getLogger("dunetrace.run")
+
+# A customer redact hook that raises is logged at WARNING exactly once per
+# process, then at DEBUG — the hook fires on every tool call, and one bad
+# hook must not turn an agent's logs into a wall of tracebacks.
+_redact_hook_warned = False
+
+# A hook object whose class lives in unittest.mock is a test double standing
+# in for the client, not a redaction hook: it is callable and answers every
+# attribute, which is exactly what makes a MagicMock() client look configured.
+_MOCK_MODULE = "unittest.mock"
+
+
+def _read_redaction_settings(client: Any) -> Tuple[int, Optional[Callable[[dict], dict]], Any]:
+    """``(max_field_chars, redact_hook, compiled_denylist)`` off the client.
+
+    ``Dunetrace.__init__`` sets all three as plain attributes, but a RunContext
+    must also work on any duck-typed client — the framework callback handlers
+    are unit-tested with ``MagicMock()`` clients, which answer *every*
+    attribute lookup, so ``getattr(client, name, default)`` never falls back.
+    Each value is therefore type-checked and anything that is not the real
+    thing reads as "unconfigured": the documented default cap, no hook, the
+    built-in denylist. Read once per run, never on the hot path.
+    """
+    raw_max = getattr(client, "_max_field_chars", None)
+    max_chars = (
+        raw_max
+        if isinstance(raw_max, int) and not isinstance(raw_max, bool) and raw_max >= 0
+        else DEFAULT_MAX_FIELD_CHARS
+    )
+    hook = getattr(client, "_redact_hook", None)
+    if not callable(hook) or type(hook).__module__ == _MOCK_MODULE:
+        hook = None
+    denylist = getattr(client, "_redact_denylist", None)
+    if not (
+        isinstance(denylist, tuple)
+        and len(denylist) == 2
+        and isinstance(denylist[0], frozenset)
+        and isinstance(denylist[1], tuple)
+    ):
+        denylist = None
+    return max_chars, hook, denylist
+
+
+def _apply_redaction(hook: Optional[Callable[[dict], dict]], denylist: Any, args: dict) -> dict:
+    """Customer hook first, then the built-in denylist. Never raises.
+
+    The hook gets a shallow copy and is expected to return a new dict; if it
+    raises, or returns something that is not a dict, its output is discarded
+    and the *original* args continue into the denylist step — the built-in
+    protection still applies, and the agent is never blocked by its own
+    redaction code. The hook is retried on every call rather than disabled
+    after one failure: a hook that chokes on one odd payload still protects
+    every other one.
+    """
+    global _redact_hook_warned
+    if hook is not None:
+        try:
+            out = hook(dict(args))
+            if isinstance(out, dict):
+                args = out
+            else:
+                raise TypeError(f"redact hook returned {type(out).__name__}, expected dict")
+        except Exception as exc:
+            logger.log(
+                logging.DEBUG if _redact_hook_warned else logging.WARNING,
+                "Dunetrace: redact hook failed (%s: %s); shipping args with the built-in "
+                "denylist only. This is logged once at WARNING, then at DEBUG.",
+                type(exc).__name__,
+                exc,
+            )
+            _redact_hook_warned = True
+    return redact_dict(args, denylist)
+
+
+def _serialize_args(
+    hook: Optional[Callable[[dict], dict]],
+    denylist: Any,
+    args: Any,
+    max_chars: Optional[int],
+) -> Tuple[str, bool, int]:
+    """``(text, truncated, original_length)`` for a tool_called / approval
+    ``args`` value. A dict goes through the hook and the denylist and is then
+    JSON-serialised; a list or tuple skips the (dict-typed) hook but is still
+    denylist-walked and JSON-serialised; anything else is ``str()``-ed and
+    capped as-is (a handoff adapter passes a bare string, and that string must
+    land on the wire unchanged). ``None`` is the empty-args ``"{}"``."""
+    if isinstance(args, dict):
+        return serialize_capped(_apply_redaction(hook, denylist, args), max_chars)
+    if isinstance(args, (list, tuple)):
+        return serialize_capped(redact_dict(args, denylist), max_chars)
+    if args is None:
+        return "{}", False, 2
+    return cap_text(args, max_chars)
+
+
+_INF = float("inf")
+
+
+def _coerce_meta(meta: dict, denylist: Any, max_chars: Optional[int]) -> dict:
+    """JSON-safe, redacted, capped copy of an ``external_signal`` ``**meta``.
+
+    ``external_signal(**meta)`` takes whatever the caller has to hand — a
+    ``requests.Response``, a ``datetime``, an ORM row, a numpy scalar — and
+    those values used to land verbatim in the event payload. The first thing
+    to look at them was the drain thread's ``json.dumps``, which is the wrong
+    place to find out: one ``TypeError`` there killed the ``dunetrace-drain``
+    thread outright and every later event buffered forever, with nothing in
+    the log but a raw ``threading.excepthook`` traceback.
+
+    JSON scalars pass through unchanged, so the documented usage is
+    byte-identical on the wire. Everything else goes through the same capped
+    JSON serialisation the tool-args path uses. ``NaN``/``Infinity`` are
+    stringified: ``json.dumps`` emits them happily but they are not valid
+    JSON, so a strict server-side parser rejects the batch. Never raises.
+    """
+    if not meta:
+        return {}
+    try:
+        source = redact_dict(meta, denylist)
+        if not isinstance(source, dict):  # pragma: no cover - redact_dict contract
+            source = meta
+        out: dict = {}
+        for key, value in source.items():
+            name = key if isinstance(key, str) else _safe_str(key)
+            if value is None or isinstance(value, (bool, int)):
+                out[name] = value
+            elif isinstance(value, float):
+                # NaN/inf have no JSON spelling; str() keeps the information.
+                out[name] = value if value == value and -_INF < value < _INF else _safe_str(value)
+            elif isinstance(value, str):
+                out[name] = cap_text(value, max_chars)[0]
+            else:
+                out[name] = serialize_capped(value, max_chars)[0]
+        return out
+    except Exception:
+        logger.debug("Dunetrace: external_signal meta coercion failed", exc_info=True)
+        return {}
+
 
 # Valid values for the voice hooks — validated at the call site so an invalid
 # state string never reaches the events table (where a voice-pack detector
@@ -78,6 +225,12 @@ class RunContext:
         conversation_id: Optional[str] = None,
     ) -> None:
         self._client = client
+        # Content caps and redaction, resolved once here (with type guards, so
+        # a duck-typed or mock client reads as unconfigured) and read by every
+        # emit hook below — see _read_redaction_settings.
+        self._max_field_chars, self._redact_hook, self._redact_denylist = _read_redaction_settings(
+            client
+        )
         self.run_id = run_id or str(uuid.uuid4())
         self.agent_id = agent_id
         self.agent_version = agent_version
@@ -139,6 +292,14 @@ class RunContext:
         # Failure types the active signal policies name; None = run everything.
         self._needed_signal_types: Optional[set] = None
         self._detector_cache_signals: list = []
+        # The detector subset the signal pass runs, cached per (policy engine
+        # generation, detector-config store generation): the store's list for
+        # this agent (server thresholds, packs) filtered to what the active
+        # signal policies name. Regenerated when either generation moves.
+        self._policy_detectors: Optional[list] = None
+        self._policy_detectors_key: tuple = (-1, -1)
+        # Store generation whose baselines were last copied onto self.state.
+        self._baselines_generation: int = -1
 
         # Cached per engine generation: whether any active policy uses trigger="signal".
         # Invalidated when the engine reloads (remote refresh) or add_policy() is called
@@ -154,6 +315,30 @@ class RunContext:
         # computed from this at context-build time (never read on the eval hot path,
         # keeping evaluation itself clock-free / deterministic).
         self._started_monotonic: float = time.monotonic()
+
+        # Index this run on the client so the terminal event can flush any
+        # stream the caller abandoned (see Dunetrace._flush_run_streams).
+        # Guarded: RunContext is routinely constructed against a duck-typed
+        # client in tests and framework adapters, which has only _emit.
+        register = getattr(client, "_register_run", None)
+        if callable(register):
+            try:
+                register(self)
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Dunetrace: run context registration failed", exc_info=True)
+
+    # ── Content caps ─────────────────────────────────────────────────────────
+
+    def _max_chars(self) -> int:
+        """Per-field character cap, resolved from the client in __init__."""
+        return self._max_field_chars
+
+    def _serialize_args(self, args: Any) -> Tuple[str, bool, int]:
+        """Redact + serialise + cap a tool/approval ``args`` value with this
+        run's settings — see the module-level ``_serialize_args``."""
+        return _serialize_args(
+            self._redact_hook, self._redact_denylist, args, self._max_field_chars
+        )
 
     # ── Streamed calls ────────────────────────────────────────────────────────
 
@@ -266,7 +451,12 @@ class RunContext:
             # Typed access to the output text. Stored on the struct even when
             # transmission is opted out below — it's already in-process here, so
             # local runtime detectors keep full fidelity at zero bandwidth cost.
-            lc.output_text = output or None
+            # Capped to the same length the wire carries: local and server-side
+            # detectors must read the same text, and output_length above still
+            # holds the real size for anything that needs it.
+            lc.output_text = (
+                cap_text(output, self._max_chars())[0] if isinstance(output, str) else output
+            ) or None
             if prompt_tokens:
                 lc.prompt_tokens = prompt_tokens
                 # An exact figure from the provider's usage block supersedes the
@@ -299,7 +489,7 @@ class RunContext:
         # a degraded call additionally carries instrumentation_degraded, while an
         # env-var omission does not.
         if output is not None and not _omit_llm_output_text():
-            payload["output"] = output
+            put_capped(payload, "output", output, self._max_chars())
         # Echoed so the server-side builders can pair this response with its call
         # by identity rather than by arrival order. Omitted (not null) when there
         # is no call to name, keeping the wire format unchanged for that case.
@@ -326,22 +516,33 @@ class RunContext:
         *,
         _enforce_approval: bool = True,
     ) -> None:
-        args_repr = str(args or {})
+        # What leaves the process — and what the in-path detectors read off
+        # ToolCall.args — is the redacted, capped serialisation, never the raw
+        # dict. Policy evaluation below still sees the raw ``args`` (a policy
+        # gating on args.amount needs the real value), but that never ships.
+        args_repr, args_truncated, args_len = self._serialize_args(args)
         self.state.tool_calls.append(
             ToolCall(
                 tool_name=tool_name,
                 args=args_repr,
                 step_index=self.step,
                 timestamp=time.time(),
+                # Pre-truncation length, so OVERSIZED_TOOL_ARGUMENTS can still
+                # fire in-path on a payload the cap has shortened below its
+                # threshold. None when nothing was cut: len(args) is exact.
+                args_length=args_len if args_truncated else None,
             )
         )
-        self._emit(
-            EventType.TOOL_CALLED,
-            {
-                "tool_name": tool_name,
-                "args": args_repr,
-            },
-        )
+        payload: Dict[str, Any] = {"tool_name": tool_name, "args": args_repr}
+        if args_truncated:
+            payload["args_truncated"] = True
+            payload["args_original_length"] = args_len
+            # Same number under the key the shared run_builder already reads
+            # for the OTLP path (ToolCall.args_length), so server-side
+            # OVERSIZED_TOOL_ARGUMENTS keeps working on SDK runs without a
+            # builder change. Only present when truncated, like the markers.
+            payload["args_length"] = args_len
+        self._emit(EventType.TOOL_CALLED, payload)
         # Human-in-the-loop gate (Capability 2, Phase 2.5): if a
         # require_approval policy matches this tool, block synchronously until a
         # human decides (raises ApprovalDenied on deny/timeout). Suppressed only
@@ -365,6 +566,14 @@ class RunContext:
             computed_length = len(output) if output else 0
         else:
             computed_length = output_length
+        # output_length above is the REAL length; only the text is capped.
+        payload: dict = {
+            "tool_name": tool_name,
+            "success": success,
+            "output_length": computed_length,
+            "latency_ms": latency_ms,
+        }
+        capped_output = put_capped(payload, "output", output, self._max_chars())
         # Back-fill success, error, and output on the most recent matching ToolCall.
         # _error_count increments only when a ToolCall is actually found and back-filled
         # so the running total stays in sync with the full-scan baseline in build_metrics.
@@ -373,17 +582,10 @@ class RunContext:
                 tc.success = success
                 tc.error = error_text
                 tc.output_length = computed_length
-                tc.output = output or None
+                tc.output = capped_output or None
                 if not success:
                     self._error_count += 1
                 break
-        payload: dict = {
-            "tool_name": tool_name,
-            "success": success,
-            "output_length": computed_length,
-            "latency_ms": latency_ms,
-            "output": output,
-        }
         if error_text:
             payload["error"] = error_text
         self._emit(EventType.TOOL_RESPONDED, payload, advance=False)
@@ -391,13 +593,9 @@ class RunContext:
     # ── Retrieval hooks (RAG) ─────────────────────────────────────────────────
 
     def retrieval_called(self, index_name: str, query: str = "") -> None:
-        self._emit(
-            EventType.RETRIEVAL_CALLED,
-            {
-                "index_name": index_name,
-                "query": query,
-            },
-        )
+        payload: Dict[str, Any] = {"index_name": index_name}
+        put_capped(payload, "query", query, self._max_chars())
+        self._emit(EventType.RETRIEVAL_CALLED, payload)
 
     def retrieval_responded(
         self,
@@ -407,26 +605,23 @@ class RunContext:
         latency_ms: int = 0,
         content: str = "",
     ) -> None:
+        payload: Dict[str, Any] = {
+            "index_name": index_name,
+            "result_count": result_count,
+            "top_score": top_score,
+            "latency_ms": latency_ms,
+        }
+        capped_content = put_capped(payload, "content", content, self._max_chars())
         self.state.retrievals.append(
             RetrievalResult(
                 index_name=index_name,
                 result_count=result_count,
                 top_score=top_score,
                 step_index=self.step,
-                content=content or None,
+                content=capped_content or None,
             )
         )
-        self._emit(
-            EventType.RETRIEVAL_RESPONDED,
-            {
-                "index_name": index_name,
-                "result_count": result_count,
-                "top_score": top_score,
-                "latency_ms": latency_ms,
-                "content": content,
-            },
-            advance=False,
-        )
+        self._emit(EventType.RETRIEVAL_RESPONDED, payload, advance=False)
 
     # ── Voice hooks (detector pack "voice") ───────────────────────────────────
     #
@@ -572,22 +767,29 @@ class RunContext:
 
         SLOW_STEP and other detectors correlate these signals with failures so evidence reads
         "tool took 100s — coincided with rate_limit from openai" rather than just "tool took 100s".
+
+        ``**meta`` takes whatever the caller has to hand, so it is coerced to
+        JSON-safe values here rather than left for the drain thread's
+        ``json.dumps`` to choke on — see ``_coerce_meta``. The coerced form is
+        what goes into ``RunState`` too, so in-process detectors and the server
+        read the same values.
         """
         ts = time.time()
+        safe_meta = _coerce_meta(meta, self._redact_denylist, self._max_field_chars)
         self.state.external_signals.append(
             ExternalSignal(
                 signal_name=signal_name,
                 step_index=self.step,
                 timestamp=ts,
                 source=source,
-                meta=dict(meta),
+                meta=dict(safe_meta),
             )
         )
         payload: dict = {"signal_name": signal_name}
         if source:
             payload["source"] = source
-        if meta:
-            payload["meta"] = dict(meta)
+        if safe_meta:
+            payload["meta"] = dict(safe_meta)
         # Emit directly — bypass _emit() so step counter does not advance.
         event = AgentEvent(
             event_type=EventType.EXTERNAL_SIGNAL,
@@ -625,14 +827,15 @@ class RunContext:
                 f"memory_written: source must be one of {sorted(_MEMORY_SOURCES)} "
                 f"or None, got {source!r}"
             )
-        payload: Dict[str, Any] = {"key": key, "value": value}
+        payload: Dict[str, Any] = {"key": key}
+        capped_value = put_capped(payload, "value", value, self._max_chars())
         if source is not None:
             payload["source"] = source
         self.state.memory_events.append(
             MemoryEvent(
                 op="written",
                 key=key,
-                value=value,
+                value=capped_value,
                 source=source,
                 step_index=self.step,
                 timestamp=time.time(),
@@ -670,11 +873,15 @@ class RunContext:
     # require_approval policy action so a policy fires them from tool_called.
 
     def _begin_approval(self, tool_name: str, args: Any, timeout_s: int) -> int:
+        # The approval row is shown to a human in Slack/the dashboard — the
+        # same redaction and cap as tool.called, so a secret the event stream
+        # never carries doesn't leak through the approval request instead.
+        tool_args = self._serialize_args(args)[0] if args is not None else None
         row = self._client._create_approval_request(
             run_id=self.run_id,
             agent_id=self.agent_id,
             tool_name=tool_name,
-            tool_args=str(args) if args is not None else None,
+            tool_args=tool_args,
             timeout_seconds=timeout_s,
         )
         approval_id = int(row["id"])
@@ -858,6 +1065,12 @@ class RunContext:
             self.agent_id, tool_name, context, observer=self._policy_observer()
         )
 
+    def _detector_config_store(self) -> Optional[DetectorConfigStore]:
+        """The client's DetectorConfigStore, or None for a duck-typed/mock
+        client that has none — the signal pass then runs TIER1_DETECTORS."""
+        store = getattr(self._client, "_detector_config_store", None)
+        return store if isinstance(store, DetectorConfigStore) else None
+
     # ── Policy evaluation observability (Phase 5) ───────────────────────────────
 
     def _policy_observer(self):
@@ -887,6 +1100,26 @@ class RunContext:
             conditions = [t.to_dict() for t in trace]
             trigger = policy.condition.get("trigger", "")
             reason = build_reason(trigger, trigger_matched, fired, conditions)
+            # Bundle freshness: was this evaluated against a current remote
+            # bundle, or against whatever was last loaded (or nothing) because
+            # the policy server has been unreachable? Remote fetching is
+            # "configured" exactly when the client would attempt one.
+            bundle_stale, bundle_age = False, None
+            engine = getattr(client, "_policy_engine", None)
+            if engine is not None:
+                remote_configured = bool(
+                    getattr(client, "_ingest_url", "") and getattr(client, "_api_key", "")
+                )
+                bundle_stale, bundle_age = engine.bundle_status(self.agent_id, remote_configured)
+            # Same question for the detector configuration the signal pass
+            # ran with — class defaults / an overdue copy read as stale.
+            config_stale, config_age = False, None
+            store = self._detector_config_store()
+            if store is not None:
+                remote_configured = bool(
+                    getattr(client, "_ingest_url", "") and getattr(client, "_api_key", "")
+                )
+                config_stale, config_age = store.bundle_status(self.agent_id, remote_configured)
             record = PolicyEvaluationRecord(
                 policy_name=policy.name,
                 policy_id=policy.id,
@@ -899,6 +1132,10 @@ class RunContext:
                 reason=reason,
                 sampled=sampled,
                 ts=time.time(),
+                policy_bundle_stale=bundle_stale,
+                policy_bundle_age_s=(round(bundle_age, 3) if bundle_age is not None else None),
+                detector_config_stale=config_stale,
+                detector_config_age_s=(round(config_age, 3) if config_age is not None else None),
             )
             if log_on:
                 eval_logger.debug(
@@ -1034,15 +1271,38 @@ class RunContext:
         if needs_signal:
             from dunetrace.detectors import run_detectors
 
-            if self.step != self._detector_cache_step:
-                from dunetrace.detectors import TIER1_DETECTORS
+            store = self._detector_config_store()
+            store_generation = store.generation if store is not None else -1
+            subset_key = (engine._generation, store_generation)
+            if self._policy_detectors is None or self._policy_detectors_key != subset_key:
+                # The detector list for THIS agent — the server's thresholds
+                # and packs once /v1/detector-config has loaded, the
+                # TIER1_DETECTORS class defaults before that — narrowed to the
+                # failure types the active signal policies name.
+                if store is not None:
+                    detectors = store.detectors_for(self.agent_id)
+                else:
+                    from dunetrace.detectors import TIER1_DETECTORS
 
+                    detectors = TIER1_DETECTORS
                 wanted = self._needed_signal_types
-                subset = (
-                    [d for d in TIER1_DETECTORS if d.name in wanted] if wanted is not None else None
+                self._policy_detectors = (
+                    [d for d in detectors if d.name in wanted]
+                    if wanted is not None
+                    else list(detectors)
                 )
+                self._policy_detectors_key = subset_key
+                # A new list may be a changed configuration: rerun this step.
+                self._detector_cache_step = -1
+            if store is not None and self._baselines_generation != store_generation:
+                # Seed the P75 baselines the adaptive detectors read
+                # (only fields still None — a caller-set value is kept).
+                store.apply_baselines(self.agent_id, self.state)
+                self._baselines_generation = store_generation
+
+            if self.step != self._detector_cache_step:
                 self._detector_cache_signals = run_detectors(
-                    self.state, detectors=subset, context="policy"
+                    self.state, detectors=self._policy_detectors, context="policy"
                 )
                 self._detector_cache_step = self.step
             sigs = self._detector_cache_signals
