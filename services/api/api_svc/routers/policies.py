@@ -14,7 +14,7 @@ from dunetrace.policies import (
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.db.queries import (
     list_policies,
     get_policy_by_id,
@@ -190,7 +190,7 @@ async def list_all_policies(
 @router.post("", response_model=Dict[str, Any], summary="Create a policy")
 async def create(
     body: PolicyCreate,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
     _validate(body.condition, body.action, body.name)
     row = await create_policy(
@@ -243,7 +243,7 @@ async def get_evaluations(
 async def update(
     policy_id: int,
     body: PolicyUpdate,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(org_id, policy_id)
     if existing is None:
@@ -259,7 +259,7 @@ async def update(
 @router.delete("/{policy_id}", response_model=Dict[str, Any], summary="Delete a policy")
 async def delete(
     policy_id: int,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(org_id, policy_id)
     if existing is None:
@@ -276,7 +276,7 @@ async def delete(
 )
 async def toggle(
     policy_id: int,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(org_id, policy_id)
     if existing is None:

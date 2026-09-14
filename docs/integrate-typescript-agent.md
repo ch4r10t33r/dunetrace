@@ -155,7 +155,7 @@ autoInstrument({ openai: OpenAI, targets: ["openai"] });   // no HTTP instrument
 | | |
 |---|---|
 | Errors | A failed call propagates unchanged and emits no `llm.responded` — there's no usage or output to describe. HTTP failures *are* recorded, as `tool.responded` with `success: false`. |
-| LangChain.js | Needs a callback-handler integration rather than a patch — LangChain.js has no global handler registry equivalent to the Python `register_configure_hook` the Python SDK relies on. Use `dt.tool()` / `dt.trace()`, or the [Vercel AI SDK integration](#vercel-ai-sdk-integration). |
+| LangChain.js | Needs a callback-handler integration rather than a patch — LangChain.js has no global handler registry equivalent to the Python `register_configure_hook` the Python SDK relies on. Use `dt.tool()` / `dt.trace()`, or the [Vercel AI SDK integration](./integrate-vercel-ai.md). |
 | CrewAI | Python-only — there is no JavaScript port to instrument. |
 
 A bug in event emission can never fail your LLM call: emission is wrapped so it warns and continues rather than throwing into your call path.
@@ -282,7 +282,11 @@ const dt = new Dunetrace({ emitAsJson: true, endpoint: null });
 
 ### Tuning detectors
 
-Edit `detectors.yml` on the server, then `docker compose restart detector`:
+Edit `detectors.yml` on the server, then restart **both** the detector and the ingest service — ingest serves the same file to SDKs over `GET /v1/detector-config`, so restarting only the detector leaves every agent's in-path pass on the old thresholds for the life of the ingest process:
+
+```bash
+docker compose restart detector ingest
+```
 
 ```yaml
 default:

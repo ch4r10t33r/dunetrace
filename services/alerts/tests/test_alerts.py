@@ -896,7 +896,13 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
     async def test_token_counts_set_when_llm_events_present(self):
         captured = []
         await self._run(
-            {"run-tok": {"prompt_tokens": 300, "completion_tokens": 80, "model": "gpt-4o"}},
+            {
+                ("org-1", "run-tok"): {
+                    "prompt_tokens": 300,
+                    "completion_tokens": 80,
+                    "model": "gpt-4o",
+                }
+            },
             captured,
         )
         self.assertIsNotNone(captured[0].total_tokens)
@@ -905,7 +911,13 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
     async def test_cost_set_when_model_known(self):
         captured = []
         await self._run(
-            {"run-tok": {"prompt_tokens": 1_000_000, "completion_tokens": 0, "model": "gpt-4o"}},
+            {
+                ("org-1", "run-tok"): {
+                    "prompt_tokens": 1_000_000,
+                    "completion_tokens": 0,
+                    "model": "gpt-4o",
+                }
+            },
             captured,
         )
         self.assertAlmostEqual(captured[0].cost_usd, 2.50)
@@ -920,7 +932,8 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
         """Both tokens = 0 should yield total_tokens=None, not 0."""
         captured = []
         await self._run(
-            {"run-tok": {"prompt_tokens": 0, "completion_tokens": 0, "model": "gpt-4o"}}, captured
+            {("org-1", "run-tok"): {"prompt_tokens": 0, "completion_tokens": 0, "model": "gpt-4o"}},
+            captured,
         )
         self.assertIsNone(captured[0].total_tokens)
         self.assertIsNone(captured[0].cost_usd)

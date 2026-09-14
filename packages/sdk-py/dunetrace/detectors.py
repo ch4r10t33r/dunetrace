@@ -4598,12 +4598,12 @@ class UnresolvedAmbiguityDetector(BaseDetector):
         harvested here too — see _approval_notes for why they are the
         highest-trust text in a run, and for the run-scoping limitation.
 
-        Reads the raw EXTERNAL_SIGNAL events as well as state.external_signals,
-        because the two are not equivalent on both sides of the wire:
+        Reads the raw EXTERNAL_SIGNAL events as well as state.external_signals.
         build_run_state() — the server-side reconstruction every detector-worker
-        run goes through — never repopulates state.external_signals, so a
-        detector consulting only the typed view would silently lose every later
-        user turn on exactly the path that matters most.
+        run goes through — now rebuilds the typed view too, so the two agree;
+        the raw scan is kept as the belt-and-braces path for a RunState built by
+        anything else (a custom reconstruction, an older stored run), and `seen`
+        dedupes the overlap by text so a turn is never counted twice.
         """
         turns: List[Tuple[int, str]] = []
         if state.input_text:
@@ -5097,6 +5097,50 @@ TIER1_DETECTORS: List[BaseDetector] = [
 ]
 
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
+
+# detectors.yml section key → detector class, one entry per built-in detector
+# (all 34). The single source of that mapping: the server-side worker's
+# ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
+# the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
+# ``GET /v1/detector-config`` response through it, so a threshold keyed by
+# yaml section lands on the same class on both sides. Insertion order is the
+# server's evaluation order; keep it in step with TIER1_DETECTORS above.
+DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
+    "instrumentation_degraded": InstrumentationDegradedDetector,
+    "oversized_tool_arguments": OversizedToolArgumentsDetector,
+    "tool_loop": ToolLoopDetector,
+    "tool_thrashing": ToolThrashingDetector,
+    "scattershot_tool_use": ScattershotToolUseDetector,
+    "tool_avoidance": ToolAvoidanceDetector,
+    "goal_abandonment": GoalAbandonmentDetector,
+    "prompt_injection_signal": PromptInjectionDetector,
+    "rag_empty_retrieval": RagEmptyRetrievalDetector,
+    "excessive_retrieval": ExcessiveRetrievalDetector,
+    "llm_truncation_loop": LlmTruncationLoopDetector,
+    "silent_truncation": SilentTruncationDetector,
+    "context_bloat": ContextBloatDetector,
+    "slow_step": SlowStepDetector,
+    "retry_storm": RetryStormDetector,
+    "empty_llm_response": EmptyLlmResponseDetector,
+    "step_count_inflation": StepCountInflationDetector,
+    "cascading_tool_failure": CascadingToolFailureDetector,
+    "first_step_failure": FirstStepFailureDetector,
+    "reasoning_stall": ReasoningSpinDetector,
+    "cost_spike": CostSpikeDetector,
+    "session_latency": SessionLatencyDetector,
+    "premature_termination": PrematureTerminationDetector,
+    "unread_tool_error": UnreadToolErrorDetector,
+    "tool_argument_fabrication": ToolArgumentFabricationDetector,
+    "retrieved_content_injection": RetrievedContentInjectionDetector,
+    "agent_handoff_failure": AgentHandoffFailureDetector,
+    "handoff_context_loss": HandoffContextLossDetector,
+    "runaway_iteration": RunawayIterationDetector,
+    "model_fallback_drift": ModelFallbackDriftDetector,
+    "memory_poisoning": MemoryPoisonedDetector,
+    "delegation_loop": DelegationLoopDetector,
+    "ungrounded_destination": UngroundedDestinationDetector,
+    "unresolved_ambiguity": UnresolvedAmbiguityDetector,
+}
 
 
 # ── Cost budget tracking ────────────────────────────────────────────────────────

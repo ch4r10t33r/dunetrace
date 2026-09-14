@@ -110,8 +110,15 @@ run-level; three (below) operate across a conversation:
   0.21 vs 0.60 between wrong- and right-task; 0% false positives at the default
   0.5 threshold, including partial / ambiguous / multi-part hard negatives) —
   see `scripts/calibration/task_understanding_failure_calibration.md`.
+- **`OFF_TOPIC_DRIFT`** — did the response start on the user's
+  question and then wander off it (unrelated features, marketing, a tangent).
+  Distinct from `TASK_UNDERSTANDING_FAILURE`: drift starts on-topic and loses
+  the thread, rather than misreading the task from the start. Covering multiple
+  related aspects of a broad question is not drift. Calibrated on 100 runs (margin
+  0.44 vs 0.82; 0% false positives including broad multi-aspect answers at the
+  default 0.5 threshold) — see `scripts/calibration/off_topic_drift_calibration.md`.
 
-Two more operate on conversations rather than single runs — see
+The remaining **three** operate on conversations rather than single runs — see
 [Conversation-level evaluation](#conversation-level-evaluation) below:
 
 - **`USER_FRUSTRATION`** — is the user getting frustrated across the
@@ -130,17 +137,11 @@ Two more operate on conversations rather than single runs — see
   legitimate-correction genuinely overlap, it ships precision-first at threshold
   **0.4** (0% false positives, 88% recall) rather than the standard 0.5 — see
   `scripts/calibration/sycophancy_signal_calibration.md`.
-- **`OFF_TOPIC_DRIFT`** (run-level) — did the response start on the user's
-  question and then wander off it (unrelated features, marketing, a tangent).
-  Distinct from `TASK_UNDERSTANDING_FAILURE`: drift starts on-topic and loses
-  the thread, rather than misreading the task from the start. Covering multiple
-  related aspects of a broad question is not drift. Calibrated on 100 runs (margin
-  0.44 vs 0.82; 0% false positives including broad multi-aspect answers at the
-  default 0.5 threshold) — see `scripts/calibration/off_topic_drift_calibration.md`.
 
-LLM provider is configurable per evaluator (`SEMANTIC_LLM_PROVIDER`,
-default OpenAI `gpt-4o-mini` for cost; upgradeable to `gpt-4o` or
-Anthropic's `claude-sonnet-4-6` on demand). No custom Dunetrace-proprietary
+LLM provider is configurable per evaluator (`SEMANTIC_LLM_PROVIDER` — `openai`,
+`anthropic` or `mistral`; default OpenAI `gpt-4o-mini` for cost, upgradeable to
+`gpt-4o` or Anthropic's `claude-sonnet-4-6` on demand, see above for the full
+provider table). No custom Dunetrace-proprietary
 evaluators ship in v1 — only DeepEval's own metrics; a custom evaluator for
 a failure mode DeepEval doesn't cover is a deliberate later step, not a v1
 scope item.

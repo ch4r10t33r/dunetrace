@@ -168,6 +168,10 @@ still recorded normally.
 Streamed LLM calls are recorded too, for `openai`, `anthropic` and `mistral`
 alike. `llm.called` is emitted when the call is made; `llm.responded` when the
 stream finishes, carrying the accumulated token counts, output text and latency.
+The output text is subject to the SDK's per-field cap (`max_field_chars`, default
+8192, env `DUNETRACE_MAX_FIELD_CHARS`); a cut field carries `output_truncated`
+and `output_original_length` beside it, and `output_length` is always the real
+size — see the SDK README's "What leaves the process".
 
 The stream you get back is a transparent proxy: a real iterator and a context
 manager, with everything else falling through to the underlying stream, so

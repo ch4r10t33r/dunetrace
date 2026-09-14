@@ -6,7 +6,10 @@
 > what an SDK/agent needs — so the process being gated cannot grant its own
 > approval. Mint an operator key with `{"scopes": ["approve"]}` for whoever
 > actually decides, or use the Slack path, which verifies Slack's signature
-> rather than a Dunetrace key.
+> rather than a Dunetrace key. Minting itself takes an **`admin`** key —
+> `POST /v1/keys` is admin-gated and a key can only grant scopes it holds — and
+> the first admin key on a fresh install comes from the ingest bootstrap in
+> [Operations › Deploying](operations.md#minting-the-first-api-key).
 
 Some tool calls are too consequential to run unattended — wiring money, deleting
 data, sending a customer email. An **approval policy** gates a specific tool: the
@@ -122,8 +125,12 @@ once-per-run. Two calls to a guarded tool require two approvals.
 The approval request is delivered to whatever the org has configured:
 
 - **Slack** — an interactive message with **Approve** / **Deny** buttons. The
-  click is signature-verified and records the decision. (Requires the org's
-  Slack integration.)
+  click is signature-verified against `SLACK_SIGNING_SECRET` and records the
+  decision. (Requires the org's Slack integration **and** that secret: the
+  callback route carries no API key and takes its org from the payload, so an
+  unset secret means clicks are refused with 403 outside `AUTH_MODE=dev`. This
+  is the same gate `POST /v1/approvals/{id}/decision` needs the `approve` scope
+  to pass — it must not be open to an unverified POST.)
 - **Webhook** — a signed JSON payload (`event: "approval_request"`) for building
   your own UI; call the decision endpoint back to resolve it.
 - **Dashboard** — the **Approvals** page lists pending requests with

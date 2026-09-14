@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace-mcp"
-version = "0.4.5"
+version = "0.4.6"
 description = "Dunetrace MCP server - expose agent signals to Claude Code, Cursor, and Codex"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -20,7 +20,16 @@ dependencies = [
     # every test collection died on ModuleNotFoundError, while local checkouts
     # pinned at 1.23.x kept passing. Moving to 2.x is an API migration, not a
     # version bump — do it deliberately, then raise this ceiling.
-    "mcp>=1.2,<2",
+    #
+    # The floor is 1.9.4, not 1.2, because of the --sse bind address:
+    # FastMCP's Settings.host defaulted to "0.0.0.0" through 1.9.0 and only
+    # became "127.0.0.1" in 1.9.4. This server has no authentication in any
+    # version, so a `>=1.2` range meant the *same command* exposed every tool
+    # (and the operator's admin bearer token) on every interface or on
+    # loopback depending on which `mcp` the resolver happened to pick.
+    # main() also sets mcp.settings.host explicitly; this floor is what makes
+    # the default safe for anything that bypasses main().
+    "mcp>=1.9.4,<2",
     "httpx>=0.24",
 ]
 

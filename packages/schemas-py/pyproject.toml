@@ -29,6 +29,11 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[project.optional-dependencies]
+# dunetrace_schemas.metrics degrades to no-op metrics without it; the services
+# install it through their own requirements.txt.
+metrics = ["prometheus-client>=0.20"]
+
 [tool.setuptools.packages.find]
 where   = ["."]
 include = ["dunetrace_schemas*"]

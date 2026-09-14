@@ -11,6 +11,7 @@ it will not send again even if the worker restarts.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 from typing import Any
@@ -259,7 +260,18 @@ async def _send_org_digest(org_id: str) -> bool:
     payload = format_digest_slack(data, org_id)
 
     try:
-        result = send_slack(payload)
+        # asyncio.to_thread, like every other send in this service (see
+        # worker.py's _deliver_one and the approval path). send_slack is
+        # synchronous: urllib POSTs at a 10s timeout with time.sleep between
+        # retries, so calling it inline blocked the whole event loop. With
+        # Slack failing that is ~54s per org (four timeouts plus 2+4+8s of
+        # backoff), repeated every cycle for the full digest hour because a
+        # failed send never logs the digest as sent. Nothing else ran in that
+        # window: no signal was claimed, no approval was delivered, and the
+        # metrics thread could not schedule the readiness check onto the loop,
+        # so /ready timed out to 503 and the container was marked unhealthy
+        # while Slack, not the worker, was the thing that was broken.
+        result = await asyncio.to_thread(send_slack, payload)
     except Exception as exc:
         logger.error("Failed to send weekly digest for org_id=%s: %s", org_id, exc)
         return False

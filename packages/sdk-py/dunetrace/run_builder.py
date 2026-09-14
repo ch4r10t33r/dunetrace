@@ -21,12 +21,25 @@ from typing import Any, Optional
 from dunetrace.models import (
     AgentEvent,
     EventType,
+    ExternalSignal,
     RunState,
     ToolCall,
     LlmCall,
     MemoryEvent,
     RetrievalResult,
 )
+
+
+def _dropped_events(payload: dict) -> int:
+    """``dropped_events`` off a terminal payload — the SDK omits it when 0.
+
+    Tolerates a malformed value (a custom SDK sending a string, say): an
+    unreadable count is treated as 0 rather than failing the whole rebuild.
+    """
+    try:
+        return max(0, int(payload.get("dropped_events") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def build_run_state(events: list[dict]) -> RunState:
@@ -79,10 +92,12 @@ def build_run_state(events: list[dict]) -> RunState:
         # run.completed - record exit reason
         elif event_type == "run.completed":
             state.exit_reason = payload.get("exit_reason", "completed")
+            state.dropped_events = max(state.dropped_events, _dropped_events(payload))
 
         # run.errored
         elif event_type == "run.errored":
             state.exit_reason = "error"
+            state.dropped_events = max(state.dropped_events, _dropped_events(payload))
 
         # llm.called - record the call, response fields filled in later
         elif event_type == "llm.called":
@@ -212,6 +227,27 @@ def build_run_state(events: list[dict]) -> RunState:
                     top_score=payload.get("top_score"),
                     step_index=step_index,
                     content=payload.get("content") or None,
+                )
+            )
+
+        # external.signal - reconstruct the typed infrastructure-context view.
+        # Missing here, state.external_signals was always empty server-side while
+        # the in-path RunState had it populated, so SLOW_STEP lost its
+        # `coincident_signals` evidence and MODEL_FALLBACK_DRIFT always reported
+        # `preceded_by_rate_limit: false` — the same run explained one way in
+        # the agent and another way in the dashboard. Fire/no-fire was never
+        # affected; only the evidence that names *why*.
+        elif event_type == "external.signal":
+            meta = payload.get("meta")
+            state.external_signals.append(
+                ExternalSignal(
+                    signal_name=payload.get("signal_name") or "",
+                    step_index=step_index,
+                    timestamp=raw.get("timestamp", 0.0),
+                    # The SDK omits `source` when empty; ExternalSignal's own
+                    # default is "" and detectors compare it as a string.
+                    source=payload.get("source") or "",
+                    meta=dict(meta) if isinstance(meta, dict) else {},
                 )
             )
 

@@ -29,76 +29,13 @@ _pool = None
 
 # ── Pool lifecycle ─────────────────────────────────────────────────────────────
 
-_MIGRATIONS_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS co_signal_count INTEGER NOT NULL DEFAULT 0;
-"""
+# Every table this service shares with another — failure_signals, organizations,
+# api_keys, fixes, policies, policy_evaluations, custom_detectors,
+# custom_detector_results, packs, org_enabled_packs, run_state_metrics — is
+# declared by dunetrace_schemas.migrations, which init_pool() applies before
+# any of the DDL below. What is declared here is this service's alone.
 
-_FIXES_DDL = """
-CREATE TABLE IF NOT EXISTS fixes (
-    id                    BIGSERIAL PRIMARY KEY,
-    run_id                TEXT        NOT NULL,
-    signal_id             BIGINT      NOT NULL,
-    fix_content           TEXT        NOT NULL,
-    fix_type              TEXT        NOT NULL DEFAULT 'prompt_addition',
-    applied_via           TEXT        NOT NULL,
-    langfuse_prompt_name  TEXT,
-    langfuse_version      INTEGER,
-    applied_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- org_id is nullable here: this table is also created by ingest_svc, which owns the
--- org_id backfill + NOT NULL migration (services/ingest/ingest_svc/db/postgres.py).
--- Whichever service starts first creates the base table; the other's ALTER ... ADD
--- COLUMN IF NOT EXISTS / backfill is a no-op or idempotent catch-up.
-ALTER TABLE fixes ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
-CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
-"""
-
-_POLICIES_DDL = """
-CREATE TABLE IF NOT EXISTS policies (
-    id          BIGSERIAL PRIMARY KEY,
-    agent_id    TEXT        NOT NULL DEFAULT '*',
-    name        TEXT        NOT NULL,
-    condition   JSONB       NOT NULL,
-    action      JSONB       NOT NULL,
-    enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
-    priority    INT         NOT NULL DEFAULT 100,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- See fixes.org_id comment above — same cross-service "whichever wins" ownership.
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
-"""
-
-_POLICY_SECURITY_DDL = """
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
--- Which version of the HMAC canonical form a policy was signed under. Existing
--- rows default to 1 (the original form); policies using a condition.match
--- expression block are signed as 2. Verification is driven by this per-row value.
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS sig_version INT NOT NULL DEFAULT 1;
-
--- Policy evaluation observability (Phase 5). Owned/written by ingest_svc; created
--- defensively here (IF NOT EXISTS) so the API's read query never fails if the API
--- happens to start first. Kept in sync with ingest_svc's DDL.
-CREATE TABLE IF NOT EXISTS policy_evaluations (
-    id              BIGSERIAL PRIMARY KEY,
-    org_id          TEXT,
-    policy_id       BIGINT,
-    policy_name     TEXT        NOT NULL DEFAULT '',
-    agent_id        TEXT        NOT NULL DEFAULT '',
-    run_id          TEXT,
-    trigger_name    TEXT,
-    trigger_matched BOOLEAN,
-    fired           BOOLEAN,
-    sampled         BOOLEAN     NOT NULL DEFAULT FALSE,
-    reason          TEXT,
-    conditions      JSONB,
-    evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_policy_evals_policy
-    ON policy_evaluations(org_id, policy_id, evaluated_at DESC);
-
+_POLICY_AUDIT_DDL = """
 CREATE TABLE IF NOT EXISTS policy_audit_log (
     id          BIGSERIAL    PRIMARY KEY,
     policy_id   BIGINT,
@@ -125,8 +62,6 @@ CREATE INDEX IF NOT EXISTS idx_policy_audit_changed_at ON policy_audit_log(chang
 """
 
 _FEEDBACK_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
-
 CREATE TABLE IF NOT EXISTS agent_detector_overrides (
     agent_id         TEXT        NOT NULL,
     failure_type     TEXT        NOT NULL,
@@ -163,102 +98,12 @@ END $$;
 ALTER TABLE agent_detector_overrides ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
 """
 
-_KEYS_DDL = """
--- organizations/org_id replace companies/customer_id (see
--- services/ingest/ingest_svc/db/postgres.py for the rename migration that owns
--- this transition). This DDL only needs to land the NEW shape idempotently —
--- whichever of ingest_svc/api_svc starts first creates it.
-CREATE TABLE IF NOT EXISTS organizations (
-    id          TEXT PRIMARY KEY,
-    name        TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-INSERT INTO organizations (id, name) VALUES ('default', 'Default Organization')
-    ON CONFLICT (id) DO NOTHING;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS id BIGSERIAL;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_rpm INTEGER NOT NULL DEFAULT 600;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_id ON api_keys(id);
-"""
-
-_CUSTOM_DETECTORS_DDL = """
-CREATE TABLE IF NOT EXISTS custom_detectors (
-    id                BIGSERIAL    PRIMARY KEY,
-    agent_id          TEXT         NOT NULL DEFAULT '*',
-    name              TEXT         NOT NULL,
-    description       TEXT         NOT NULL,
-    config_json       JSONB        NOT NULL,
-    status            TEXT         NOT NULL DEFAULT 'shadow',
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    total_runs        INTEGER      NOT NULL DEFAULT 0,
-    shadow_fire_count INTEGER      NOT NULL DEFAULT 0
-);
--- org_id ownership: see detector_svc/db.py, which also creates this table and
--- owns the org_id backfill + NOT NULL migration for it.
-ALTER TABLE custom_detectors ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_custom_detectors_agent ON custom_detectors(agent_id, status);
-
-CREATE TABLE IF NOT EXISTS custom_detector_results (
-    id           BIGSERIAL    PRIMARY KEY,
-    detector_id  BIGINT       NOT NULL REFERENCES custom_detectors(id) ON DELETE CASCADE,
-    run_id       TEXT         NOT NULL,
-    agent_id     TEXT         NOT NULL,
-    fired        BOOLEAN      NOT NULL,
-    evaluated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-ALTER TABLE custom_detector_results ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
-"""
-
-# Phase 1.4.3 — semantic signal feedback capture. This service creates
-# signal_groups/signal_group_members defensively (IF NOT EXISTS) even though
-# semantic_svc is their primary owner — same dual-creation convention already
-# used for custom_detectors/custom_detector_results (detector_svc + api_svc):
-# whichever service starts first wins, and semantic_svc may never even be
-# enabled (SEMANTIC_WORKER_ENABLED defaults to false) on a given install.
+# Phase 1.4.3 — semantic signal feedback capture. signal_groups /
+# signal_group_members / signal_group_overrides (which this service reads and,
+# for fp_count, writes) are migration 10's; the per-org opt-in flags this loop
+# is gated on (organizations.semantic_feedback_enabled / _auto_suppress) are
+# migration 6's. What is declared here is this service's alone.
 _SEMANTIC_FEEDBACK_DDL = """
--- Opt-in per org (default off) — the whole feedback loop (capture +
--- auto-suppress) is inert until an org turns it on. auto_suppress controls
--- what happens once a group crosses the false-positive threshold: FALSE
--- (default) just lowers future confidence by 0.3; TRUE stops writing new
--- signals for that group entirely. See semantic_svc/worker.py.
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_enabled BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_auto_suppress BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS signal_groups (
-    id                BIGSERIAL    PRIMARY KEY,
-    org_id            TEXT         NOT NULL,
-    agent_id          TEXT         NOT NULL,
-    evaluator         TEXT         NOT NULL,
-    root_cause_hash   TEXT         NOT NULL,
-    root_cause_sample TEXT         NOT NULL,
-    first_seen        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    last_seen         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    signal_count      INTEGER      NOT NULL DEFAULT 0,
-    UNIQUE (org_id, agent_id, evaluator, root_cause_hash)
-);
-CREATE INDEX IF NOT EXISTS idx_signal_groups_org_agent ON signal_groups(org_id, agent_id);
-
-CREATE TABLE IF NOT EXISTS signal_group_members (
-    id         BIGSERIAL   PRIMARY KEY,
-    group_id   BIGINT      NOT NULL REFERENCES signal_groups(id) ON DELETE CASCADE,
-    signal_id  BIGINT      NOT NULL,
-    run_id     TEXT        NOT NULL,
-    added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_signal_group_members_group ON signal_group_members(group_id, added_at DESC);
-CREATE INDEX IF NOT EXISTS idx_signal_group_members_signal ON signal_group_members(signal_id);
-
--- One row per group that has accumulated false-positive feedback. No row at
--- all means fp_count=0 — a group is only ever created here once its first
--- false_positive verdict arrives (see record_signal_feedback).
-CREATE TABLE IF NOT EXISTS signal_group_overrides (
-    group_id   BIGINT      PRIMARY KEY REFERENCES signal_groups(id) ON DELETE CASCADE,
-    fp_count   INTEGER     NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 -- One row per feedback submission (not per group) — (signal_id, org_id,
 -- verdict, notes), exactly the shape in the Phase 1.4 brief. Aggregation
 -- into signal_group_overrides.fp_count happens at write time in
@@ -274,205 +119,20 @@ CREATE TABLE IF NOT EXISTS signal_feedback (
 CREATE INDEX IF NOT EXISTS idx_signal_feedback_signal ON signal_feedback(signal_id);
 """
 
-# Phase 1.5 — semantic evaluation billing/quotas. Defensively duplicated from
-# semantic_svc's own migration (services/semantic/semantic_svc/db.py), same
-# whichever-starts-first convention as _SEMANTIC_FEEDBACK_DDL above — this
-# service's new usage endpoint reads both tables without depending on
-# semantic_svc (which may be disabled entirely, SEMANTIC_WORKER_ENABLED
-# defaults to false) having ever run.
-_SEMANTIC_QUOTA_DDL = """
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_evaluation_quota INTEGER NOT NULL DEFAULT 1000;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS allow_semantic_overage BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS org_semantic_evaluation_usage (
-    org_id     TEXT    NOT NULL,
-    month      TEXT    NOT NULL,
-    eval_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (org_id, month)
-);
-
-CREATE TABLE IF NOT EXISTS semantic_evaluation_log (
-    id                BIGSERIAL   PRIMARY KEY,
-    org_id            TEXT        NOT NULL,
-    agent_id          TEXT        NOT NULL,
-    evaluator         TEXT        NOT NULL,
-    fired             BOOLEAN     NOT NULL,
-    prompt_tokens     INTEGER     NOT NULL,
-    completion_tokens INTEGER     NOT NULL,
-    cost_usd          REAL        NOT NULL,
-    evaluated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_semantic_evaluation_log_org_time ON semantic_evaluation_log(org_id, evaluated_at);
-"""
-
-# Phase 2.1 — external evaluation integrations (Langfuse first; LangSmith/
-# Braintrust reuse this same generic shape in 2.2/2.3, differing only by
-# `provider` and whatever keys their own credentials JSON needs).
-# Primarily owned by integrations_worker's own migration (not yet built as of
-# this PR being the config-CRUD half); duplicated here defensively, same
-# whichever-starts-first convention as every other cross-service table in
-# this schema.
-_INTEGRATIONS_DDL = """
-CREATE TABLE IF NOT EXISTS external_evaluation_integrations (
-    id                    BIGSERIAL    PRIMARY KEY,
-    org_id                TEXT         NOT NULL,
-    provider              TEXT         NOT NULL,
-    endpoint_url          TEXT         NOT NULL,
-    encrypted_credentials TEXT         NOT NULL,
-    poll_interval_secs    INTEGER      NOT NULL DEFAULT 60,
-    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
-    last_polled_at        TIMESTAMPTZ,
-    last_success_at       TIMESTAMPTZ,
-    consecutive_failures  INTEGER      NOT NULL DEFAULT 0,
-    first_failure_at      TIMESTAMPTZ,
-    last_alerted_at       TIMESTAMPTZ,
-    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, provider)
-);
-CREATE INDEX IF NOT EXISTS idx_ext_integrations_enabled
-    ON external_evaluation_integrations(enabled) WHERE enabled = TRUE;
-
--- Dedup: a poll's overlap window (to tolerate the provider's own indexing
--- lag) will re-fetch evaluations already seen — this is what prevents
--- writing a duplicate failure_signals row for the same external evaluation.
-CREATE TABLE IF NOT EXISTS external_evaluation_processed (
-    org_id       TEXT        NOT NULL,
-    provider     TEXT        NOT NULL,
-    external_id  TEXT        NOT NULL,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (org_id, provider, external_id)
-);
-"""
-
-# Phase 4.1 — ElevenLabs pull integration credentials (bring-your-own API key
-# per org, encrypted at rest). Deliberately a DEDICATED table, not a row in
-# external_evaluation_integrations: ElevenLabs is not an evaluation provider
-# (it yields TTS generations we correlate to tts.generated events by
-# timestamp/character-count/voice, not scores we join by trace_id), so it
-# stores different state (a generation high-water mark, no endpoint_url — the
-# base URL is fixed). It still reuses the same Fernet encrypt-at-rest infra and
-# the same failure-tracking columns as external_evaluation_integrations so the
-# Phase 4.3 poller gets identical failure-isolation/backoff behavior for free.
-# Primarily owned by elevenlabs_worker's own migration (Phase 4.3); duplicated
-# here defensively, same whichever-starts-first convention as every other
-# cross-service table in this schema.
-_ELEVENLABS_DDL = """
-CREATE TABLE IF NOT EXISTS elevenlabs_integrations (
-    id                      BIGSERIAL        PRIMARY KEY,
-    org_id                  TEXT             NOT NULL UNIQUE,
-    encrypted_credentials   TEXT             NOT NULL,
-    poll_interval_secs      INTEGER          NOT NULL DEFAULT 300,
-    enabled                 BOOLEAN          NOT NULL DEFAULT TRUE,
-    last_polled_at          TIMESTAMPTZ,
-    last_success_at         TIMESTAMPTZ,
-    last_seen_generation_at DOUBLE PRECISION,
-    consecutive_failures    INTEGER          NOT NULL DEFAULT 0,
-    first_failure_at        TIMESTAMPTZ,
-    last_alerted_at         TIMESTAMPTZ,
-    created_at              TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
-    updated_at              TIMESTAMPTZ       NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_elevenlabs_integrations_enabled
-    ON elevenlabs_integrations(enabled) WHERE enabled = TRUE;
-
--- elevenlabs_generations is owned by elevenlabs_worker (Phase 4.3/4.4);
--- duplicated here defensively so api_svc's Phase 5 read paths (run/call detail,
--- filter listing) never hit a missing table when an org has ElevenLabs
--- configured but this service started first. Column-for-column identical to
--- integrations_svc/db.py's copy.
-CREATE TABLE IF NOT EXISTS elevenlabs_generations (
-    id                     BIGSERIAL        PRIMARY KEY,
-    org_id                 TEXT             NOT NULL,
-    generation_id          TEXT             NOT NULL,
-    voice_id               TEXT,
-    voice_name             TEXT,
-    model                  TEXT,
-    character_count        INTEGER          NOT NULL DEFAULT 0,
-    cost_credits           INTEGER,
-    text                   TEXT,
-    source                 TEXT,
-    generated_at           DOUBLE PRECISION NOT NULL,
-    correlated_to_event_id BIGINT,
-    correlation_method     TEXT,
-    correlation_confidence REAL,
-    correlated_at          TIMESTAMPTZ,
-    unmatched_reason       TEXT,
-    run_id                 TEXT,
-    agent_id               TEXT,
-    fetched_at             TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, generation_id)
-);
-ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS run_id TEXT;
-ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS agent_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_elevenlabs_gen_run
-    ON elevenlabs_generations(org_id, run_id);
-"""
-
-_ALERT_INTEGRATIONS_DDL = """
--- Phase 4.1 — per-org Slack/Linear alert destinations, both bring-your-own
--- (a customer's own Slack incoming webhook / Linear API key + webhook
--- secret), same encrypt-at-rest pattern as Phase 2.1's
--- external_evaluation_integrations. api_svc only ever encrypts (on config
--- submission) and never decrypts, EXCEPT for Linear's webhook_secret — see
--- api_svc/crypto.py::decrypt_credentials_for_webhook_verification's
--- docstring for why that one case is a deliberate, narrow exception.
--- alerts_svc is the only thing that decrypts webhook_url/api_key, to
--- actually call Slack/Linear's API.
-CREATE TABLE IF NOT EXISTS org_alert_integrations (
-    id                    BIGSERIAL    PRIMARY KEY,
-    org_id                TEXT         NOT NULL,
-    provider              TEXT         NOT NULL,   -- 'slack' | 'linear'
-    encrypted_credentials TEXT         NOT NULL,   -- slack: {webhook_url}; linear: {api_key, webhook_secret}
-    config_json           JSONB        NOT NULL DEFAULT '{}',  -- slack: {channel}; linear: {team_id, project_id}
-    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, provider)
-);
-
--- Bi-directional sync (Linear issue closed -> Dunetrace signal resolved).
--- Written by alerts_svc (when it creates a Linear issue for a signal), read
--- by api_svc's webhook receiver (routers/linear_webhook.py) to find which
--- signal a given Linear issue corresponds to.
-CREATE TABLE IF NOT EXISTS linear_issue_signals (
-    id              BIGSERIAL    PRIMARY KEY,
-    org_id          TEXT         NOT NULL,
-    signal_id       BIGINT       NOT NULL,
-    linear_issue_id TEXT         NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (linear_issue_id)
-);
-"""
-
-# Phase 4.2 — MCP resolve_issue tool. `issues` is owned by detector_svc
-# (services/detector/detector_svc/db.py); api_svc has only ever read it
-# (list_issues) until now. This service becomes the first WRITER of these
-# two specific columns (via resolve_issue below), so it defensively ensures
-# they exist here — same "whichever service needs a column adds it
-# defensively" convention detector_svc itself already uses for
-# failure_signals.shadow/co_signal_count (owned by ingest_svc).
-# Deliberately orthogonal to the existing auto-resolve/reopen-on-recurrence
-# machinery (clean_runs_since) — a manually-resolved issue still reopens if
-# the failure recurs later, same as an auto-resolved one; these two columns
-# only record how a resolution happened, not a permanent lock.
-#
-# Guarded by an existence check, not a bare ALTER — api_svc doesn't create
-# `issues` itself (detector_svc does), so on a fresh install where
-# detector_svc hasn't started yet, a bare ALTER TABLE would fail with
-# "relation issues does not exist" and crash this service's entire
-# startup, taking down every other endpoint with it. This degrades to a
-# no-op instead, retried (and eventually succeeding) on next restart —
-# same tolerance list_issues already implicitly relies on.
-_ISSUES_RESOLUTION_DDL = """
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'issues') THEN
-        ALTER TABLE issues ADD COLUMN IF NOT EXISTS resolution_notes TEXT;
-        ALTER TABLE issues ADD COLUMN IF NOT EXISTS manually_resolved BOOLEAN NOT NULL DEFAULT FALSE;
-    END IF;
-END $$;
-"""
+# Every other table this service shares with a worker is declared by
+# dunetrace_schemas.migrations, applied first in init_pool():
+# - org_semantic_evaluation_usage / semantic_evaluation_log (the usage
+#   endpoint; written by semantic_svc)                          -> migration 10
+# - external_evaluation_integrations / external_evaluation_processed
+#   (config CRUD; polled by integrations_svc)                    -> migration 11
+# - elevenlabs_integrations / elevenlabs_generations (config CRUD and the
+#   run/call read paths; polled by integrations_svc)             -> migration 11
+# - org_alert_integrations / linear_issue_signals (config CRUD and the
+#   Linear webhook receiver; delivered by alerts_svc)            -> migration 9
+# - issues, including resolution_notes / manually_resolved, which
+#   resolve_issue() below writes (upserted by detector_svc)      -> migration 12
+# Each used to be a "defensive copy" of the worker's DDL here, guarded on
+# whichever service started first; the copies are gone.
 
 # Phase 4.3 — GitHub App per-org config. installation_id isn't a secret (an
 # App is one operator-level registration; per-org installs are just
@@ -520,43 +180,6 @@ CREATE TABLE IF NOT EXISTS agent_source_config (
 );
 """
 
-# failure_signals.source is owned by semantic_svc's migration (added there
-# for Phase 1's semantic evaluators, reused by integrations_svc for
-# Phase 2's external providers) — but Phase 4.4's agent_performance_trends()
-# reads it directly from api_svc, and semantic_svc is disabled by default
-# (SEMANTIC_WORKER_ENABLED). Found via a real 500 (UndefinedColumnError)
-# against a deployment that had never started semantic_svc: api_svc must not
-# assume a column owned by an optional service exists. Defensive
-# ADD COLUMN IF NOT EXISTS, same "whichever starts first wins" convention
-# already used for custom_detectors/custom_detector_results above.
-_PERFORMANCE_TRENDS_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural';
-"""
-
-# Pack activation (Phase 1.0). detector_svc owns packs (it seeds rows from
-# PACK_REGISTRY at startup and is the sole reader of org_enabled_packs for
-# detector selection) — created here too defensively, same "whichever starts
-# first wins" convention as every other cross-service table, since api_svc
-# is the write path for activation (POST/DELETE /v1/orgs/packs/{name}) and
-# must not assume detector_svc has started first.
-_PACKS_DDL = """
-CREATE TABLE IF NOT EXISTS packs (
-    name           TEXT         PRIMARY KEY,
-    description    TEXT         NOT NULL,
-    detector_names TEXT[]       NOT NULL DEFAULT '{}',
-    added_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS org_enabled_packs (
-    org_id      TEXT         NOT NULL,
-    pack_name   TEXT         NOT NULL REFERENCES packs(name),
-    enabled_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    enabled_by  TEXT,
-    PRIMARY KEY (org_id, pack_name)
-);
-CREATE INDEX IF NOT EXISTS idx_org_enabled_packs_org ON org_enabled_packs(org_id);
-"""
-
 # Human-in-the-loop approvals (Capability 2). org_id TEXT NOT NULL, no FK to
 # organizations(id) — same convention as every other org-scoped table here.
 # status is stored as TEXT (validated against api_svc.approvals.ApprovalStatus
@@ -594,25 +217,6 @@ CREATE INDEX IF NOT EXISTS idx_approvals_undelivered
     ON approvals(requested_at) WHERE delivered_at IS NULL AND status = 'pending';
 """
 
-# Per-run state metrics (Capability 3, Phase 3.3). Written by detector_svc,
-# read here for cross-run analytics. Defensive copy (CREATE IF NOT EXISTS) —
-# whichever service starts first wins, same pattern as the packs tables.
-_RUN_STATE_METRICS_DDL = """
-CREATE TABLE IF NOT EXISTS run_state_metrics (
-    run_id         TEXT         NOT NULL,
-    org_id         TEXT         NOT NULL,
-    agent_id       TEXT         NOT NULL,
-    state          TEXT         NOT NULL,
-    total_ms       BIGINT       NOT NULL,
-    segment_count  INT          NOT NULL,
-    run_started_at TIMESTAMPTZ,
-    computed_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (run_id, state)
-);
-CREATE INDEX IF NOT EXISTS idx_rsm_agent
-    ON run_state_metrics(org_id, agent_id, run_started_at);
-"""
-
 
 def _ts(v):
     """Normalize a DB timestamp (datetime or numeric) to a unix-epoch float, or
@@ -637,33 +241,34 @@ async def init_pool() -> None:
         statement_cache_size=0,
     )
     # Shared schema first: migrations own every definition more than one
-    # service touches, and the DDL below ALTERs tables another service creates.
-    # Booting this service against an empty database used to crash on
+    # service touches (the tables this service reads but never declares, and
+    # the ones it writes alongside ingest or the detector). Booting this
+    # service against an empty database used to crash on
     # `relation "failure_signals" does not exist`.
-    from dunetrace_schemas.migrations import apply_migrations
+    #
+    # Apply, then require. require_schema_version is the guard for a replica
+    # that could not apply (a lock timeout, a read-only standby): it raises
+    # before any local DDL runs, so a too-old schema fails the start here
+    # rather than the first query that reads a column it lacks.
+    from dunetrace_schemas.migrations import (
+        CURRENT_SCHEMA_VERSION,
+        apply_migrations,
+        require_schema_version,
+        schema_connection,
+    )
 
-    async with _pool.acquire() as conn:
+    # Untimed connection: a migration that builds an index on a populated
+    # table takes longer than the pool's command_timeout. See schema_connection.
+    async with schema_connection(settings.DATABASE_URL) as conn:
         await apply_migrations(conn)
+        await require_schema_version(conn, CURRENT_SCHEMA_VERSION, "api")
 
     async with _pool.acquire() as conn:
-        await conn.execute(_MIGRATIONS_DDL)
-        await conn.execute(_FIXES_DDL)
-        await conn.execute(_POLICIES_DDL)
-        await conn.execute(_POLICY_SECURITY_DDL)
+        await conn.execute(_POLICY_AUDIT_DDL)
         await conn.execute(_FEEDBACK_DDL)
-        await conn.execute(_KEYS_DDL)
-        await conn.execute(_CUSTOM_DETECTORS_DDL)
         await conn.execute(_SEMANTIC_FEEDBACK_DDL)
-        await conn.execute(_SEMANTIC_QUOTA_DDL)
-        await conn.execute(_INTEGRATIONS_DDL)
-        await conn.execute(_ELEVENLABS_DDL)
-        await conn.execute(_ALERT_INTEGRATIONS_DDL)
-        await conn.execute(_ISSUES_RESOLUTION_DDL)
         await conn.execute(_GITHUB_APP_DDL)
-        await conn.execute(_PERFORMANCE_TRENDS_DDL)
-        await conn.execute(_PACKS_DDL)
         await conn.execute(_APPROVALS_DDL)
-        await conn.execute(_RUN_STATE_METRICS_DDL)
     logger.info("DB pool ready")
 
 
@@ -672,6 +277,15 @@ async def close_pool() -> None:
     if _pool:
         await _pool.close()
         _pool = None
+
+
+def get_pool():
+    """The live asyncpg pool (None before init_pool / after close_pool).
+
+    Exposed for the readiness probe in main.py, which hands it to
+    dunetrace_schemas.metrics.db_ready — nothing else should reach for it.
+    """
+    return _pool
 
 
 async def check_db() -> str:
@@ -1653,13 +1267,22 @@ def _cost_bucket(cost_usd: float) -> str:
 
 
 async def _fetch_call_events_and_signals(conn, org_id: str, run_ids: list) -> tuple[list, list]:
+    # org_id is not redundant with the caller's conversation/runs authorisation:
+    # run_id is caller-supplied, so two tenants legitimately hold the same one
+    # (that is why `runs` is keyed (org_id, run_id)). Fanning out on the bare id
+    # pulled the *other* tenant's transcription.received (caller speech),
+    # tts.generated (spoken text), llm.called/llm.responded payloads and
+    # recording.available URLs into this tenant's call timeline, recordings list
+    # and cost breakdown. The failure_signals read below was always scoped; this
+    # one has to be too.
     event_rows = await conn.fetch(
         """
         SELECT run_id, event_type, payload, received_at, step_index
         FROM events
-        WHERE run_id = ANY($1::text[]) AND event_type = ANY($2::text[])
+        WHERE org_id = $1 AND run_id = ANY($2::text[]) AND event_type = ANY($3::text[])
         ORDER BY received_at ASC
         """,
+        org_id,
         run_ids,
         list(_CALL_EVENT_TYPES),
     )
@@ -1701,9 +1324,16 @@ async def list_calls(
             WHERE c.org_id = $1
               AND ($2::text IS NULL OR c.agent_id = $2)
               AND ($3::timestamptz IS NULL OR c.last_run_at >= $3)
+              -- Both halves of the join carry org_id for the same reason
+              -- _fetch_call_events_and_signals does: run_id is caller-supplied
+              -- and collides across tenants, so `e.run_id = r.run_id` alone lets
+              -- another org's voice events decide that this org's conversation
+              -- is a call at all.
               AND EXISTS (
-                  SELECT 1 FROM runs r JOIN events e ON e.run_id = r.run_id
-                  WHERE r.conversation_id = c.id AND e.event_type = ANY($4::text[])
+                  SELECT 1 FROM runs r
+                  JOIN events e ON e.run_id = r.run_id AND e.org_id = r.org_id
+                  WHERE r.conversation_id = c.id AND r.org_id = c.org_id
+                    AND e.event_type = ANY($4::text[])
               )
             ORDER BY c.last_run_at DESC
             LIMIT $5
@@ -1718,9 +1348,14 @@ async def list_calls(
             return [], 0
         conv_ids = [r["id"] for r in conv_rows]
 
+        # conv_ids came from an org-scoped read, but the run ids harvested here
+        # are handed straight to the events fan-out below — re-asserting org_id
+        # keeps the whole chain scoped instead of relying on one upstream filter.
         run_rows = await conn.fetch(
-            "SELECT run_id, conversation_id FROM runs WHERE conversation_id = ANY($1::bigint[])",
+            "SELECT run_id, conversation_id FROM runs "
+            "WHERE conversation_id = ANY($1::bigint[]) AND org_id = $2",
             conv_ids,
+            org_id,
         )
         run_to_conv = {r["run_id"]: r["conversation_id"] for r in run_rows}
         run_ids = list(run_to_conv.keys())
@@ -1794,9 +1429,13 @@ async def get_call_detail(org_id: str, conversation_id: int) -> Optional[dict]:
         if not conv:
             return None
 
+        # Same reason as list_calls: these run ids feed the events fan-out, so
+        # the org filter travels with them rather than stopping at `conversations`.
         run_rows = await conn.fetch(
-            "SELECT run_id, agent_version, started_at FROM runs WHERE conversation_id = $1 ORDER BY started_at ASC",
+            "SELECT run_id, agent_version, started_at FROM runs "
+            "WHERE conversation_id = $1 AND org_id = $2 ORDER BY started_at ASC",
             conversation_id,
+            org_id,
         )
         run_ids = [r["run_id"] for r in run_rows]
         if not run_ids:

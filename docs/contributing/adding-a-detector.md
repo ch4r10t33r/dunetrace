@@ -79,20 +79,31 @@ Rules of the road:
 
 Then add an instance to the `TIER1_DETECTORS` list at the bottom of the file.
 
-### 2. Add the `FailureType` — in BOTH enums
+### 2. Add the `FailureType` — edit the source, then generate
 
-This is the step first-time contributors miss and it fails CI. Add your member to
-**both**:
-
-- `packages/sdk-py/dunetrace/models.py` → `class FailureType`
-- `packages/schemas-py/dunetrace_schemas/enums.py` → `class FailureType`
+This is the step first-time contributors miss and it fails CI. The SDK's
+`FailureType` (`dunetrace.models`) and the schemas package's
+(`dunetrace_schemas.enums`) are both **generated** from one source file, because
+the two packages must not import each other. Add your member to
+`FAILURE_TYPE_MEMBERS` in `packages/schemas-py/dunetrace_schemas/enum_source.py`
+(a `(NAME, value, comment_or_None)` tuple — keep it before `CUSTOM`):
 
 ```python
-EXCESSIVE_RETRIEVAL = "EXCESSIVE_RETRIEVAL"
+("EXCESSIVE_RETRIEVAL", "EXCESSIVE_RETRIEVAL", None),
 ```
 
-`packages/schemas-py/tests/test_sdk_parity.py` asserts the two are identical — if
-you add to one and not the other, the `schemas-py` CI job goes red.
+then regenerate both enum modules:
+
+```bash
+python scripts/gen_enums.py
+```
+
+That rewrites `packages/sdk-py/dunetrace/_enums.py` and
+`packages/schemas-py/dunetrace_schemas/enums.py` (both carry a `# GENERATED` header —
+never edit them by hand; commit them alongside the source). The docs-consistency
+CI job runs `python scripts/gen_enums.py --check` and goes red if either module
+is stale, and `packages/schemas-py/tests/test_sdk_parity.py` stays as the backstop
+asserting the two enums are identical.
 
 ### 3. Register in the detector service
 
@@ -208,7 +219,8 @@ pre-commit run --all-files    # ruff, mypy, docs-consistency, the test suites
 
 ## Common gotchas
 
-- **Enum parity (step 2)** — the #1 CI failure. Both `FailureType` enums.
+- **Generated enums (step 2)** — the #1 CI failure. Edit `enum_source.py`, run
+  `python scripts/gen_enums.py`, commit the two regenerated modules.
 - **Shadow by default** — don't add to `LIVE_DETECTORS` in the same PR.
 - **Docs consistency** — a detector name in `docs/detectors.md`/README must exist
   in code (and it must be reachable from `code_names()` in

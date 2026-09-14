@@ -190,11 +190,13 @@ web-research:
     inflation_factor: 3.0  # research agents naturally reason more before acting
 ```
 
-Named sections match the `agent_id` and inherit from `default`, overriding only what you specify. Restart the detector to apply:
+Named sections match the `agent_id` and inherit from `default`, overriding only what you specify. Restart the detector to apply — and the ingest service, which serves the same file to SDKs:
 
 ```bash
-docker compose restart detector
+docker compose restart detector ingest
 ```
+
+**Thresholds are server-authoritative.** The SDK's in-path pass (the detectors a `signal`-trigger policy evaluates inside your agent process) pulls the same effective configuration from `GET /v1/detector-config?agent_id=…` on the ingest service — the merged `default` + agent-category overrides mapped to detector constructor kwargs, the packs the org has enabled, and the agent's P75 baselines — with the same 60s TTL and failure backoff as the policy fetch. It overlays that on the detector class defaults, so tuning a threshold here changes both passes; while the fetch is failing the SDK keeps the last configuration it received (or the class defaults) and reports `detector_config_stale` on `policy.evaluated` events. In-path scan budgets (the max_scan_ns / max_surface_chars / max_args_chars / max_output_chars family) can only be lowered by the server, never raised — the agent's request path pays that cost. `detectors.yml` is mounted read-only into `ingest`, `detector` and `alerts`.
 
 ---
 
@@ -211,6 +213,8 @@ until their precision is checked against real traffic. A new built-in detector s
 `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
 
 User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
+
+**Incomplete runs are always shadow.** When the SDK's outbound buffer overflows it sheds whole runs and stamps `dropped_events: <n>` on that run's `run.completed` / `run.errored` payload (see the SDK drain-thread notes in `docs/architecture.md`). `build_run_state` reads it into `RunState.dropped_events`, and `process_run` treats any run with `dropped_events > 0` as *incomplete*: every signal it produces — built-in, Python-plugin and JSON-config custom alike — is written with `shadow = true` regardless of `LIVE_DETECTORS` or the custom detector's status, its confidence is capped at 0.5, its severity at MEDIUM, and its evidence carries `incomplete_data: {"dropped_events": n, "reason": "sdk_buffer_shed"}`. Such signals never feed the risk engine's hard override or co-occurrence boost, and the run is treated as *unknown* rather than fired or clean: neither `upsert_fired_issues` nor `advance_clean_runs` runs for it (five shed runs in a row must not auto-resolve an issue nobody verified) and it contributes nothing to baselines. The worker logs one INFO line per incomplete run; the signals are still stored and visible with `?include_shadow=true`.
 
 ### Shadow signals in the dashboard
 
@@ -1232,7 +1236,7 @@ the customer's address is silent by construction, forever.
 | `tool.responded.output` | A value the *system* returned. The entry that keeps open-destination agents silent |
 | `retrieval.responded.content` | Same argument: corpus data the system supplied |
 | `memory.written.value` (trusted `source`) | Stored earlier from a channel the attacker can't reach |
-| `approval.denied` / `approval.granted` `note` | What a human wrote when deciding an approval. Written by a holder of the `approve` scope — a credential the agent process does not have — so it is the only text in a run neither the model nor a tool can reach. Never demoted, for the same reason the system prompt isn't. See [Approvals](approvals.md#decision-notes) |
+| `approval.denied` / `approval.granted` `note` | What a human wrote when deciding an approval. Written by a holder of the `approve` scope — a credential the agent process does not have — so it is the only text in a run neither the model nor a tool can reach. Never demoted, for the same reason the system prompt isn't. See [Approvals](approvals.md#4-decision-notes) |
 
 Deliberately **excluded**: `llm.responded` output text and the agent's own earlier
 tool arguments. Grounding on model output is circular — an injected model would

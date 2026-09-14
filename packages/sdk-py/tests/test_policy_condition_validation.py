@@ -138,9 +138,10 @@ class TestDirectConstructionRejects(unittest.TestCase):
 
 class TestRemoteLoadRefusesInsteadOfRaising(unittest.TestCase):
     """PolicyEngine.load() runs on the daemon thread _fetch_policies() starts,
-    under an `except Exception: logger.debug` in client.py. A raise there would
-    be swallowed at DEBUG and would abort the rest of the batch — so this path
-    refuses the one policy and logs at ERROR instead."""
+    under a catch-all in client.py that records the whole fetch as failed
+    (WARNING, then retried on a backoff). A raise there would abort the rest
+    of the batch and leave the agent with no remote policies at all — so this
+    path refuses the one policy and logs at ERROR instead."""
 
     @staticmethod
     def _remote(policy_id, condition):

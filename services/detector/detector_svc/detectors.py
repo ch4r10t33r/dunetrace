@@ -22,6 +22,7 @@ from typing import Optional
 
 from dunetrace.detectors import (
     CUSTOM_DETECTOR_REGISTRY,
+    DETECTOR_KEYS,
     AgentHandoffFailureDetector,
     BaseDetector,
     InstrumentationDegradedDetector,
@@ -62,43 +63,9 @@ from detector_svc.config_loader import load_detector_kwargs
 
 logger = logging.getLogger("dunetrace.detector.detectors")
 
-# Maps YAML section key → detector class
-_DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
-    "instrumentation_degraded": InstrumentationDegradedDetector,
-    "oversized_tool_arguments": OversizedToolArgumentsDetector,
-    "tool_loop": ToolLoopDetector,
-    "tool_thrashing": ToolThrashingDetector,
-    "scattershot_tool_use": ScattershotToolUseDetector,
-    "tool_avoidance": ToolAvoidanceDetector,
-    "goal_abandonment": GoalAbandonmentDetector,
-    "prompt_injection_signal": PromptInjectionDetector,
-    "rag_empty_retrieval": RagEmptyRetrievalDetector,
-    "excessive_retrieval": ExcessiveRetrievalDetector,
-    "llm_truncation_loop": LlmTruncationLoopDetector,
-    "silent_truncation": SilentTruncationDetector,
-    "context_bloat": ContextBloatDetector,
-    "slow_step": SlowStepDetector,
-    "retry_storm": RetryStormDetector,
-    "empty_llm_response": EmptyLlmResponseDetector,
-    "step_count_inflation": StepCountInflationDetector,
-    "cascading_tool_failure": CascadingToolFailureDetector,
-    "first_step_failure": FirstStepFailureDetector,
-    "reasoning_stall": ReasoningSpinDetector,
-    "cost_spike": CostSpikeDetector,
-    "session_latency": SessionLatencyDetector,
-    "premature_termination": PrematureTerminationDetector,
-    "unread_tool_error": UnreadToolErrorDetector,
-    "tool_argument_fabrication": ToolArgumentFabricationDetector,
-    "retrieved_content_injection": RetrievedContentInjectionDetector,
-    "agent_handoff_failure": AgentHandoffFailureDetector,
-    "handoff_context_loss": HandoffContextLossDetector,
-    "runaway_iteration": RunawayIterationDetector,
-    "model_fallback_drift": ModelFallbackDriftDetector,
-    "memory_poisoning": MemoryPoisonedDetector,
-    "delegation_loop": DelegationLoopDetector,
-    "ungrounded_destination": UngroundedDestinationDetector,
-    "unresolved_ambiguity": UnresolvedAmbiguityDetector,
-}
+# Maps YAML section key → detector class. An alias of the SDK's DETECTOR_KEYS
+# (one map, shared with the SDK's client-side pass) — add a detector there.
+_DETECTOR_CLASSES: dict[str, type[BaseDetector]] = DETECTOR_KEYS
 
 # Load config once at import time. Passing the detector key set makes the loader
 # warn about typo'd section names — without it a misspelling silently falls back

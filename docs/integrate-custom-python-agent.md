@@ -180,7 +180,13 @@ Writes each event as an NDJSON line to stdout instead of (or alongside) HTTP ing
 
 ### Tuning detectors
 
-Edit `detectors.yml` on the server, then `docker compose restart detector` — no code changes:
+Edit `detectors.yml` on the server, then restart **both** the detector and the ingest service — ingest serves the same file to SDKs over `GET /v1/detector-config`, so restarting only the detector leaves every agent's in-path pass on the old thresholds for the life of the ingest process:
+
+```bash
+docker compose restart detector ingest
+```
+
+No code changes:
 
 ```yaml
 default:
