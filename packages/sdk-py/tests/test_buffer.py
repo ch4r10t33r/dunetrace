@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 import unittest
+import unittest.mock
 
 from dunetrace.buffer import RingBuffer
 
@@ -357,11 +358,35 @@ class TestRunAwareShedding(unittest.TestCase):
         self.assertEqual(len(cm.output), 1)
         self.assertIn("shed run r0", cm.output[0])
         # 4 runs shed, the first logged, the other 3 counted at the next line.
-        buf._last_warn_ts = 0.0
+        buf._last_warn_ts = None  # "never warned" — see the sentinel note in buffer.py
         with self.assertLogs("dunetrace", level="WARNING") as cm:
             buf.push(_Ev("late"))
         self.assertIn("3 other run(s)", cm.output[0])
         logging.getLogger("dunetrace").handlers.clear()
+
+    def test_first_warning_fires_on_a_freshly_booted_host(self):
+        """time.monotonic()'s epoch is arbitrary (seconds since boot on Linux),
+        so on a host up less than _WARN_INTERVAL_S the clock reads under 60.
+        With 0.0 as the "never warned" sentinel that made the very first shed
+        warning look like one issued moments ago, and it was dropped — on CI
+        runners and freshly started containers, which is where a buffer
+        overflowing most needs saying. Pin both rate limiters at t=3s.
+        """
+        for attr, make_overflow in (
+            ("_last_warn_ts", lambda buf: [buf.push(_Ev(f"r{i}")) for i in range(2)]),
+            (
+                "_last_protected_warn_ts",
+                lambda buf: [buf.push(_done(f"r{i}"), force=True) for i in range(3)],
+            ),
+        ):
+            with self.subTest(limiter=attr):
+                buf = RingBuffer(maxsize=1)
+                self.assertIsNone(getattr(buf, attr), "sentinel must be None, not 0.0")
+                with unittest.mock.patch("dunetrace.buffer.time.monotonic", return_value=3.0):
+                    with self.assertLogs("dunetrace", level="WARNING") as cm:
+                        make_overflow(buf)
+                self.assertTrue(cm.output)
+                logging.getLogger("dunetrace").handlers.clear()
 
     def test_push_stays_fast_under_sustained_overload(self):
         """Every push here sheds a run (worst case: one event per run) or

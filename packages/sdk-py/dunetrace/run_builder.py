@@ -16,6 +16,7 @@ place that has to learn to rebuild it.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from dunetrace.models import (
@@ -40,6 +41,37 @@ def _dropped_events(payload: dict) -> int:
         return max(0, int(payload.get("dropped_events") or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _coerce_args(raw: Any) -> str:
+    """Tool args as a string, whatever the producer put on the wire.
+
+    ``ToolCall.args`` is typed ``str`` and both first-party producers honour
+    that — the SDK serialises through ``_serialize_args``, the OTLP mapper
+    through ``otel._tool_args``. A hand-rolled ``POST /v1/ingest`` is under no
+    such obligation: ``AgentEventSchema.payload`` is ``Dict[str, Any]`` and
+    validates nothing inside it, so a caller sending
+    ``{"args": {"order_id": 4471}}`` puts a dict here.
+
+    Three detectors then raised instead of running — TOOL_LOOP and RETRY_STORM
+    build a ``set`` of args (a dict is unhashable), TOOL_ARGUMENT_FABRICATION
+    regexes over them (needs str/bytes). ``run_detectors`` catches per-detector
+    exceptions, so those runs produced no signal from any of the three and
+    nothing downstream said so: detection silently switched off for the runs
+    most likely to need it. Coercing here rather than in each detector keeps
+    the invariant at the one boundary that rebuilds ``RunState``.
+
+    Sorted keys so two equal dicts always yield the same string — TOOL_LOOP
+    compares these for equality when deciding whether a loop is arg-varying.
+    """
+    if isinstance(raw, str):
+        return raw
+    if raw is None:
+        return ""
+    try:
+        return json.dumps(raw, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return str(raw)
 
 
 def build_run_state(events: list[dict]) -> RunState:
@@ -188,7 +220,7 @@ def build_run_state(events: list[dict]) -> RunState:
             state.tool_calls.append(
                 ToolCall(
                     tool_name=tool_name,
-                    args=payload.get("args", ""),
+                    args=_coerce_args(payload.get("args", "")),
                     step_index=step_index,
                     timestamp=raw.get("timestamp", 0.0),
                     # Set only by the OTLP path, which truncates `args`.

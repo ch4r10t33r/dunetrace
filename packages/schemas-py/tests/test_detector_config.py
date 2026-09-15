@@ -64,14 +64,21 @@ default:
         path = _write_yaml("""
 default:
   scattershot_tool_use:
-    max_distinct_tools: 7
+    min_distinct_tools: 7
     min_total_calls: 10
+    min_repeat_ratio: 2.0
+    scan_limit: 100
 """)
         try:
             result = load_detector_kwargs(path)
             self.assertEqual(
                 result["default"]["scattershot_tool_use"],
-                {"MAX_DISTINCT_TOOLS": 7, "MIN_TOTAL_CALLS": 10},
+                {
+                    "MIN_DISTINCT_TOOLS": 7,
+                    "MIN_TOTAL_CALLS": 10,
+                    "MIN_REPEAT_RATIO": 2.0,
+                    "SCAN_LIMIT": 100,
+                },
             )
         finally:
             os.unlink(path)

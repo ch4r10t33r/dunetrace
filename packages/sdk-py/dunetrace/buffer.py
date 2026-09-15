@@ -131,9 +131,15 @@ class RingBuffer(Generic[T]):
         self._shed: "OrderedDict[Hashable, int]" = OrderedDict()
         self._shed_runs_total = 0
         self._protected_dropped_total = 0
-        self._last_warn_ts = 0.0
+        # None, not 0.0, means "never warned". time.monotonic()'s epoch is
+        # arbitrary — on Linux it is time since boot — so on a host that has
+        # been up for less than _WARN_INTERVAL_S, `now - 0.0` is itself under
+        # the interval and the sentinel reads as a warning issued moments ago.
+        # That swallowed the FIRST shed warning on a freshly booted machine,
+        # which is exactly when a buffer overflowing most needs saying.
+        self._last_warn_ts: Optional[float] = None
         self._sheds_since_warn = 0
-        self._last_protected_warn_ts = 0.0
+        self._last_protected_warn_ts: Optional[float] = None
         self._protected_drops_since_warn = 0
 
     # ── Producer side ────────────────────────────────────────────────────────
@@ -434,7 +440,7 @@ class RingBuffer(Generic[T]):
         """One WARNING per shed run, rate-limited to one line a minute."""
         self._sheds_since_warn += 1
         now = time.monotonic()
-        if now - self._last_warn_ts < _WARN_INTERVAL_S:
+        if self._last_warn_ts is not None and now - self._last_warn_ts < _WARN_INTERVAL_S:
             return
         suppressed = self._sheds_since_warn - 1
         self._last_warn_ts = now
@@ -453,7 +459,10 @@ class RingBuffer(Generic[T]):
         """One WARNING per evicted terminal, rate-limited to one line a minute."""
         self._protected_drops_since_warn += 1
         now = time.monotonic()
-        if now - self._last_protected_warn_ts < _WARN_INTERVAL_S:
+        if (
+            self._last_protected_warn_ts is not None
+            and now - self._last_protected_warn_ts < _WARN_INTERVAL_S
+        ):
             return
         suppressed = self._protected_drops_since_warn - 1
         self._last_protected_warn_ts = now

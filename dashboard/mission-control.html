@@ -3325,6 +3325,7 @@ const _REPLAY_MODS = [
   { type: 'reduce_context',    label: 'Cap context growth',         targets: ['CONTEXT_BLOAT'] },
   { type: 'fix_rag_retrieval', label: 'Fix empty retrieval',        targets: ['RAG_EMPTY_RETRIEVAL'] },
   { type: 'add_final_answer',  label: 'Add terminal answer',        targets: ['GOAL_ABANDONMENT'] },
+  { type: 'fix_model_downgrade', label: 'Pin to strongest model',  targets: ['MODEL_FALLBACK_DRIFT'] },
 ];
 
 function initReplayPanel(runId, signals) {

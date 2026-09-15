@@ -48,6 +48,14 @@ jobs:
       # (edit the source, run `python scripts/gen_enums.py`). Stdlib only.
       - run: python scripts/gen_enums.py --check
       - run: python -m unittest scripts.test_gen_enums
+      # detectors.yml, the detector classes, and the shared parser's _PARAM_MAP
+      # all have to agree: an unmapped YAML key is dropped with a startup
+      # warning nobody reads, and a _PARAM_MAP entry aimed at a renamed
+      # attribute produces no warning at all. Needs PyYAML to read the file and
+      # dunetrace_schemas (hence pydantic) for _PARAM_MAP.
+      - run: pip install -e packages/schemas-py pyyaml
+      - run: python scripts/check_detector_defaults.py
+      - run: python -m unittest scripts.test_check_detector_defaults
 
   sdk-py:
     name: SDK (Python)

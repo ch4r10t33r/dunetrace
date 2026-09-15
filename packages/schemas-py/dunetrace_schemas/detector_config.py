@@ -96,12 +96,20 @@ BUILTIN_DETECTOR_KEYS: frozenset[str] = frozenset(
 # Maps YAML section key -> detector constructor kwarg names (all uppercase).
 # Only detectors with tunable params need an entry here.
 _PARAM_MAP: dict[str, dict[str, str]] = {
+    "instrumentation_degraded": {"min_calls": "MIN_CALLS"},
     "oversized_tool_arguments": {"max_arg_length": "MAX_ARG_LENGTH"},
     "tool_loop": {"threshold": "THRESHOLD", "window": "WINDOW"},
     "tool_thrashing": {"window": "WINDOW"},
+    # MIN_, not MAX_: the class renamed these when the comparison (>=) was
+    # found to contradict the MAX_ name, and detectors.yml was updated to
+    # match — but this map was not, so every scattershot tunable in the
+    # shipped file was silently dropped as an unknown key. scripts/
+    # check_detector_defaults.py now fails the build on that class of drift.
     "scattershot_tool_use": {
-        "max_distinct_tools": "MAX_DISTINCT_TOOLS",
+        "min_distinct_tools": "MIN_DISTINCT_TOOLS",
         "min_total_calls": "MIN_TOTAL_CALLS",
+        "min_repeat_ratio": "MIN_REPEAT_RATIO",
+        "scan_limit": "SCAN_LIMIT",
     },
     "tool_avoidance": {"min_llm_calls": "MIN_LLM_CALLS"},
     "goal_abandonment": {"stall_steps": "STALL_STEPS"},
