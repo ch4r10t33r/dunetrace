@@ -2488,8 +2488,58 @@ _GUIDES: dict[str, str] = {
     """).strip(),
 }
 
+# Guide key -> the full Markdown doc appended to the short inline guide.
+# Every value must also appear in setup.py's BUNDLED_DOCS, or a pip-installed
+# build falls back to the inline text only; test_docs_packaging.py enforces it.
+_GUIDE_DOCS: dict[str, str] = {
+    "langchain": "integrate-langchain-agent.md",
+    "python": "integrate-custom-python-agent.md",
+    "typescript": "integrate-typescript-agent.md",
+    "tools": "integrate-custom-python-agent.md",
+    "haystack": "integrate-haystack-agent.md",
+    "voice": "integrations/voice-frameworks.md",
+    "otel": "integrate-langdock.md",
+    "crewai": "integrate-crewai-agent.md",
+    "autogen": "integrate-autogen-agent.md",
+    "llamaindex": "integrate-llamaindex.md",
+    "openai-agents": "integrate-openai-agents.md",
+    "vercel-ai": "integrate-vercel-ai.md",
+    "pydantic-ai": "integrate-pydantic-ai.md",
+    "smolagents": "integrate-smolagents.md",
+    "litellm": "integrate-litellm.md",
+    "dify": "integrate-dify.md",
+}
+
 # Aliases map natural-language variants to canonical guide keys
 _ALIASES: dict[str, str] = {
+    "crewai": "crewai",
+    "crew": "crewai",
+    "crew-ai": "crewai",
+    "autogen": "autogen",
+    "autogen-agentchat": "autogen",
+    "ag2": "autogen",
+    "llamaindex": "llamaindex",
+    "llama-index": "llamaindex",
+    "llama_index": "llamaindex",
+    "rag": "llamaindex",
+    "openai-agents": "openai-agents",
+    "openai_agents": "openai-agents",
+    "agents-sdk": "openai-agents",
+    "swarm": "openai-agents",
+    "vercel": "vercel-ai",
+    "vercel-ai": "vercel-ai",
+    "ai-sdk": "vercel-ai",
+    "nextjs": "vercel-ai",
+    "next.js": "vercel-ai",
+    "pydantic-ai": "pydantic-ai",
+    "pydantic_ai": "pydantic-ai",
+    "pydanticai": "pydantic-ai",
+    "smolagents": "smolagents",
+    "smol": "smolagents",
+    "smolagent": "smolagents",
+    "litellm": "litellm",
+    "litellm-proxy": "litellm",
+    "dify": "dify",
     "langchain": "langchain",
     "langgraph": "langchain",
     "lc": "langchain",
@@ -2526,7 +2576,6 @@ _ALIASES: dict[str, str] = {
     "opentelemetry": "otel",
     "open-telemetry": "otel",
     "langdock": "otel",
-    "dify": "otel",
     "no-code": "otel",
     "zero-code": "otel",
 }
@@ -2555,30 +2604,26 @@ def get_instrumentation_guide(framework: str) -> str:
     """
     key = _ALIASES.get(framework.lower().strip())
     if key is None:
-        supported = "langchain, python, typescript, tools, haystack, voice, otel"
+        supported = ", ".join(sorted(_GUIDE_DOCS))
         return (
             f"Unknown framework '{framework}'. Supported values: {supported}.\n\n"
-            "Use list_agents to check what agents are already instrumented."
+            "Also accepted as aliases: "
+            + ", ".join(sorted(k for k in _ALIASES if k not in _GUIDE_DOCS))
+            + ".\n\nUse list_agents to check what agents are already instrumented."
         )
 
-    guide = _GUIDES[key]
+    # A short inline guide exists for the original seven keys only. The rest
+    # rely on the full doc, which is bundled into the wheel at build time.
+    guide = _GUIDES.get(key, "")
 
-    # Append the full doc if it's available on disk (richer content)
-    doc_map = {
-        "langchain": "integrate-langchain-agent.md",
-        "python": "integrate-custom-python-agent.md",
-        "typescript": "integrate-typescript-agent.md",
-        "tools": "integrate-custom-python-agent.md",
-        "haystack": "integrate-haystack-agent.md",
-        "voice": "integrations/voice-frameworks.md",
-        "otel": "integrate-langdock.md",
-    }
-    doc_path = _DOCS / doc_map[key]
-    if doc_path.exists():
-        full = doc_path.read_text(encoding="utf-8")
-        return guide + "\n\n---\n\n" + full
-
-    return guide
+    # _read_doc, not _DOCS: resolving relative to __file__ lands in
+    # site-packages on a pip install, where there is no repo checkout, and
+    # every one of these returned "(doc not found)". The doc resources already
+    # went through _read_doc; this tool was the one caller that did not.
+    full = _read_doc(_GUIDE_DOCS[key])
+    if full.startswith("(doc not found"):
+        return guide or full
+    return (guide + "\n\n---\n\n" + full) if guide else full
 
 
 @mcp.tool()

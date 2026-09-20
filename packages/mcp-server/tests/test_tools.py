@@ -1451,14 +1451,84 @@ class TestGetInstrumentationGuideExtra(unittest.TestCase):
         out = srv.get_instrumentation_guide("lc_graph")
         self.assertIn("DunetraceCallbackHandler", out)
 
-    def test_crewai_unknown(self):
+    def test_crewai_is_supported(self):
+        """Was asserted as unknown. CrewAI is a first-class integration and the
+        guide tool now answers for it, so the old expectation encoded the gap."""
         out = srv.get_instrumentation_guide("crewai")
-        self.assertIn("Unknown framework", out)
-        self.assertIn("langchain", out)
+        self.assertNotIn("Unknown framework", out)
+        self.assertIn("DunetraceCrewCallback", out)
 
-    def test_autogen_unknown(self):
+    def test_autogen_is_supported(self):
         out = srv.get_instrumentation_guide("autogen")
+        self.assertNotIn("Unknown framework", out)
+        self.assertIn("DunetraceAutoGenObserver", out)
+
+    def test_every_supported_framework_returns_a_guide(self):
+        """No key may resolve to an empty or not-found response."""
+        for key in srv._GUIDE_DOCS:
+            with self.subTest(framework=key):
+                out = srv.get_instrumentation_guide(key)
+                self.assertNotIn("Unknown framework", out)
+                self.assertNotIn("(doc not found", out)
+                self.assertGreater(len(out), 200, f"{key} returned a stub")
+
+    def test_every_alias_resolves(self):
+        for alias, key in srv._ALIASES.items():
+            with self.subTest(alias=alias):
+                self.assertIn(key, srv._GUIDE_DOCS)
+
+    def test_a_guide_key_is_never_aliased_to_a_different_guide(self):
+        """Caught a real bug: adding `"dify": "dify"` left a pre-existing
+        `"dify": "otel"` further down the same dict. The later literal wins in
+        Python, so `dify` silently kept returning the OTel guide. Every test
+        above still passed, because `otel` is a valid key that returns a long
+        guide with no error. Only ruff's F601 saw it."""
+        for key in srv._GUIDE_DOCS:
+            with self.subTest(framework=key):
+                self.assertEqual(
+                    srv._ALIASES.get(key),
+                    key,
+                    f"{key!r} is a guide key but routes to {srv._ALIASES.get(key)!r}",
+                )
+
+    def test_alias_table_has_no_duplicate_literals(self):
+        """A duplicate key is invisible at runtime; read it from the source."""
+        import ast
+        import collections
+        import inspect
+
+        tree = ast.parse(inspect.getsource(srv))
+        for node in ast.walk(tree):
+            target = getattr(node, "target", None)
+            if isinstance(node, ast.AnnAssign) and getattr(target, "id", "") == "_ALIASES":
+                keys = [k.value for k in node.value.keys]
+                dupes = [k for k, c in collections.Counter(keys).items() if c > 1]
+                self.assertFalse(dupes, f"_ALIASES has duplicate keys: {dupes}")
+                return
+        self.fail("_ALIASES not found in server.py")
+
+    def test_each_framework_returns_its_own_guide(self):
+        """Not just 'a' guide. The dify bug returned the wrong one."""
+        expected = {
+            "crewai": "DunetraceCrewCallback",
+            "dify": "dify_client",
+            "vercel-ai": "wrapGenerateText",
+            "llamaindex": "retrieval_called",
+            "smolagents": "step_callbacks",
+            "openai-agents": "add_dunetrace_processor",
+            "pydantic-ai": "pydantic_ai",
+            "litellm": "litellm",
+            "autogen": "DunetraceAutoGenObserver",
+        }
+        for framework, needle in expected.items():
+            with self.subTest(framework=framework):
+                self.assertIn(needle, srv.get_instrumentation_guide(framework))
+
+    def test_unknown_framework_lists_what_is_supported(self):
+        out = srv.get_instrumentation_guide("cobol")
         self.assertIn("Unknown framework", out)
+        for key in ("langchain", "crewai", "vercel-ai"):
+            self.assertIn(key, out)
 
     def test_py_alias(self):
         out = srv.get_instrumentation_guide("py")

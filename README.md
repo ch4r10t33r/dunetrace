@@ -33,7 +33,7 @@ AI agents fail silently:
 - ✗ Two agents delegated in a circle. Eight runs, all green, no progress.
 - ✗ A document your agent read last week wrote an instruction into its memory. It fired today.
 
-Tracers answer "what happened?" — after you already know it broke. Dunetrace answers
+Tracers answer "what happened?" i.e. after you already know it broke. Dunetrace answers
 **"is something breaking right now?"** with deterministic, zero-LLM checks on every run,
 and in the request path, where a policy can block the action before it executes.
 
@@ -55,22 +55,22 @@ Dunetrace covers the full agent reliability lifecycle, not just one slice of it:
 
 ## Quick Start
 
-See the [examples index](examples/README.md) for ready‑to‑run examples.
-
 **1. Start the backend**
 ```bash
 git clone https://github.com/dunetrace/dunetrace
 cd dunetrace && cp .env.example .env
-docker compose -f docker-compose.ghcr.yml up -d
-pip install -r requirements.txt
+docker compose -f docker-compose.ghcr.yml up -d   # localhost, auth off — see docs/operations.md to deploy
+curl -s localhost:8001/ready && curl -s localhost:8002/ready   # both {"status":"ok",...}
 ```
-
-This runs everything on `localhost` with authentication off. To put it on a server → [Deploying](docs/operations.md#deploying).
 
 **2. Install the SDK**
 ```bash
 pip install dunetrace                       # Python
 npm install dunetrace                       # Node.js / TypeScript
+
+# Or skip steps 2-3 entirely: the skill installs the SDK and instruments your
+# code. Run /dunetrace-setup (Claude Code, Cursor) or $dunetrace-setup (Codex).
+npx skills add dunetrace/dunetrace-skills --skill dunetrace-setup
 ```
 
 **3. Instrument your agent**
@@ -114,14 +114,17 @@ await dt.run("support-agent", { model: "gpt-4o" }, async (run) => {
 
 ```bash
 cd packages/sdk-py                                      # Python
-python examples/basic_agent.py                          # No LLM calls
-SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChain
+python examples/basic_agent.py                          # No LLM calls, no API key
+SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChain — needs OPENAI_API_KEY
 SCENARIO=failures python examples/decorator_agent.py    # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
 
-cd ../sdk-ts && npm install && ollama pull llama3.2   # TypeScript — Vercel AI SDK on local Ollama, no API key
+cd ../sdk-ts && npm install                             # TypeScript — needs Node 22+
+ollama pull llama3.2                                    # and Ollama, so no API key is needed
 npm run example:vercel-ai                               # Happy path
 npm run example:vercel-ai:loop                          # TOOL_LOOP → detect → explain, end to end
 ```
+
+More, including approvals, policies, agent memory and voice → [examples index](examples/README.md)
 
 Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 

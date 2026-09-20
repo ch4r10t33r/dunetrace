@@ -56,6 +56,22 @@ jobs:
       - run: pip install -e packages/schemas-py pyyaml
       - run: python scripts/check_detector_defaults.py
       - run: python -m unittest scripts.test_check_detector_defaults
+      # Every docs/integrate-*.md must carry a <!--dunetrace:instrument--> block.
+      # The dunetrace-setup skill (dunetrace/skills) generates one reference file
+      # per block; a guide that loses its block silently drops out of the skill's
+      # framework matching table, which is a silent no-op of exactly the kind the
+      # guides themselves warn about. This only proves the guides parse -- the
+      # authoritative drift check runs in the skills repo, which has both trees.
+      - run: python scripts/gen_skill_references.py --out "$(mktemp -d)" --require-all
+      - run: python -m unittest scripts.test_gen_skill_references
+      # The detector coverage manifest the skill reads. This step is the audit:
+      # it fails if a detector is not described in
+      # scripts/detector_event_requirements.json, or if a detector reads a
+      # RunState field that its entry neither requires nor enriches. A new
+      # detector therefore cannot land without saying what instrumentation it
+      # needs, which is what keeps the coverage report's counts honest.
+      - run: python scripts/gen_detector_manifest.py --out "$(mktemp -d)"
+      - run: python -m unittest scripts.test_gen_detector_manifest
 
   sdk-py:
     name: SDK (Python)

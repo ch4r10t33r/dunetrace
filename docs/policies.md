@@ -99,7 +99,7 @@ dt.add_policy(
 When `api_key` and `endpoint` are set, the SDK fetches policies from the backend at run start and caches them for 60 seconds per agent. Policies defined in the dashboard apply automatically — no code changes needed.
 
 ```python
-dt = Dunetrace(api_key="dt_live_...", endpoint="https://ingest.dunetrace.com")
+dt = Dunetrace(api_key="dt_...", endpoint="https://ingest.dunetrace.com")
 # Policies defined in the dashboard are pulled at run start.
 ```
 
@@ -119,7 +119,7 @@ The fetch runs on a background thread at run start and never blocks or fails the
 
 ```python
 dt = Dunetrace(
-    api_key="dt_live_...",
+    api_key="dt_...",
     endpoint="https://ingest.dunetrace.com",
     policy_cache_path="/var/lib/my-agent/dunetrace-policies",
 )
@@ -307,7 +307,7 @@ When multiple policies match simultaneously, only the highest-priority one fires
 
 ```python
 dt = Dunetrace(
-    api_key="dt_live_...",
+    api_key="dt_...",
     endpoint="https://ingest.dunetrace.com",
     policy_secret="your-shared-secret",
 )

@@ -46,7 +46,7 @@ state, not a failure.
 
 ```bash
 POST /v1/orgs/integrations/langfuse
-Authorization: Bearer dt_live_...
+Authorization: Bearer dt_...
 Content-Type: application/json
 
 {
@@ -119,7 +119,7 @@ directly:
 
 ```bash
 POST /v1/semantic-signals
-Authorization: Bearer dt_live_...
+Authorization: Bearer dt_...
 Content-Type: application/json
 
 {

@@ -45,7 +45,10 @@ include = ["dunetrace_mcp*"]
 # at build time; this is what puts it in the wheel. Without it the resources
 # resolve into site-packages and return "(doc not found)" on a real install.
 [tool.setuptools.package-data]
-dunetrace_mcp = ["_docs/*.md"]
+# Second glob: some served docs live in a docs/ subdirectory (integrations/…),
+# and setup.py mirrors that structure rather than flattening it, so one
+# repo-relative path works for both the wheel and a source checkout.
+dunetrace_mcp = ["_docs/*.md", "_docs/*/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

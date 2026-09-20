@@ -67,7 +67,7 @@ The approval calls hit the **Customer API**, so the client needs `api_url` (or
 `DUNETRACE_API_URL`) and an `api_key`:
 
 ```python
-dt = Dunetrace(api_key="dt_live_...", api_url="https://your-dunetrace-host")
+dt = Dunetrace(api_key="dt_...", api_url="https://your-dunetrace-host")
 ```
 
 ---

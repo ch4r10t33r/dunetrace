@@ -664,9 +664,13 @@ Quick-start code snippet for instrumenting an agent with Dunetrace.
 
 | Argument | Type | Description |
 |---|---|---|
-| `framework` | string | `langchain`, `python`, `typescript`, `haystack`, `tools`, `voice`, or `otel` |
+| `framework` | string | `autogen`, `crewai`, `dify`, `haystack`, `langchain`, `litellm`, `llamaindex`, `openai-agents`, `otel`, `pydantic-ai`, `python`, `smolagents`, `tools`, `typescript`, `vercel-ai`, `voice` |
 
-Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `haystack-ai`, `voice-agent`, `stt`, `tts`, `speech`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
+Aliases: `ag2`, `agents-sdk`, `ai-sdk`, `autogen-agentchat`, `crew`, `crew-ai`, `custom python`, `custom-python`, `haystack-ai`, `haystack2`, `hs`, `javascript`, `js`, `langdock`, `langgraph`, `lc`, `lc-graph`, `lc_graph`, `litellm-proxy`, `llama-index`, `llama_index`, `next.js`, `nextjs`, `no-code`, `node`, `nodejs`, `open-telemetry`, `openai_agents`, `opentelemetry`, `otlp`, `py`, `pydantic_ai`, `pydanticai`, `rag`, `smol`, `smolagent`, `speech`, `stt`, `swarm`, `tool`, `tool-calls`, `tool_calls`, `tracking`, `ts`, `tts`, `vercel`, `voice-agent`, `voice-agents`, `voice_agent`, `zero-code`.
+
+Each returns a short inline guide where one exists, followed by the full
+Markdown guide. The guides are bundled into the wheel at build time, so a
+`pip install dunetrace-mcp` gets the same content as a source checkout.
 
 ---
 
