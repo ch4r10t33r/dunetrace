@@ -22,6 +22,10 @@ Policy checks are synchronous and O(1) — running totals for `error_count` and 
 
 ---
 
+> **New to policies?** [Writing your first policy](policies/first-policy.md)
+> walks the whole loop: write it, watch it in [dry run](policies/dry-run.md),
+> read what it would have done, arm it.
+
 ## Structural signals only
 
 The `trigger="signal"` condition (see [Condition reference](#condition-reference)
@@ -301,7 +305,7 @@ When multiple policies match simultaneously, only the highest-priority one fires
 1. Trigger, operator, and action type are checked against fixed allowlists — unknown values are rejected with 422. The trigger and operator allowlists are imported from `dunetrace.policies` (`VALID_TRIGGERS` / `VALID_OPERATORS`), not restated in the API, so a value this service accepts is always one the in-process engine can evaluate.
 2. Operator/trigger compatibility is checked against the metric's type — a combination that can never match (or that always matches) is rejected with 422 rather than stored as a policy that reads as enabled and prevents nothing. See the note under [Condition reference](#condition-reference).
 3. `inject_prompt` prompt content is scanned against the prompt injection pattern detector. Matching content is rejected before it reaches the database.
-4. Every policy is signed with HMAC-SHA256 at write time. The signature is stored alongside the policy. The signature covers the whole `condition` — including any [`match` expression block](policies/condition-expressions.md#signing) — so a tampered condition fails verification. Policies using a `match` block are signed under canonical-form version 2 (`sig_version: 2`); legacy policies stay version 1, byte-identical, so existing signatures keep verifying.
+4. Every policy is signed with HMAC-SHA256 at write time. The signature is stored alongside the policy. The signature covers the whole `condition` — including any [`match` expression block](policies/condition-expressions.md#signing) — so a tampered condition fails verification. The canonical form is versioned so new fields can be authenticated without invalidating signatures already issued: v1 is the original seven fields (byte-identical to pre-feature policies), v2 adds an authenticated prefix and is used by a policy with a `match` block, and v3 adds the policy's `mode`. A policy signs at the lowest version that can carry it, so an enforcing policy with no `match` block still signs at v1. `mode` is covered because it decides whether the policy enforces at all — see [Signing](policies/condition-expressions.md#signing).
 
 **Signature verification:** Configure `POLICY_SIGNING_SECRET` (same value on server and SDK client) to enable end-to-end verification:
 
@@ -315,7 +319,50 @@ dt = Dunetrace(
 
 The SDK verifies each policy's signature before loading it. Policies with a non-matching signature are skipped and logged as warnings — a tampered or replayed policy never reaches the agent.
 
-**Migration note:** Policies created before `POLICY_SIGNING_SECRET` was set will have an empty signature. These are loaded with a warning rather than silently dropped. Re-save each policy in the dashboard to sign it.
+### Degraded policies (not enforcing)
+
+An unsigned remote policy that asks for an enforcing action is **downgraded to
+log-only**. That is correct: config whose origin cannot be verified must not
+act on production traffic. What used to be wrong is that it was invisible. The
+downgrade rewrote the action in place, so from the dashboard a policy forced to
+log-only looked exactly like one someone chose to make log-only, and the only
+evidence was a single log line on a background thread.
+
+A downgraded policy is now labelled in three places:
+
+- **The policy list** shows a **DEGRADED** badge, with the reason on hover.
+- **`GET /v1/policies`** returns `enforcement` on every policy
+  (`enforcing`, `log_only`, `degraded` or `disabled`) plus an
+  `enforcement_reason` naming the fix. This is server-knowable: a policy the
+  server never signed is downgraded by every SDK that loads it.
+- **The agent logs one summary** when the degraded set changes, naming each
+  policy and the action it asked for. It logs on change, not on every
+  60-second refresh, so a steady state stays quiet.
+
+```
+2 of 3 policies are running DEGRADED (downgraded to log-only because their
+origin cannot be verified): 'stop-runaway' (wanted stop), 'downgrade-model'
+(wanted switch_model). These evaluate and record but enforce nothing. Set
+DUNETRACE_POLICY_SECRET on this agent and POLICY_SIGNING_SECRET on the server
+to restore enforcement.
+```
+
+**To resolve it:**
+
+1. Set `POLICY_SIGNING_SECRET` on the server and `DUNETRACE_POLICY_SECRET` on
+   the agent, to the same value.
+2. Re-save each affected policy so the server signs it. A policy created before
+   the secret existed has an empty signature and stays degraded until it is
+   re-saved.
+3. Confirm: the badge clears, `enforcement` reads `enforcing`, and the agent
+   logs `Policy enforcement restored: no policies are running degraded.`
+
+Policies registered in-process with `dt.add_policy()` are never downgraded.
+They are the customer's own code, and there is nothing to verify.
+
+**Not the same as dry run.** A degraded policy wanted to enforce and cannot. A
+[dry-run](policies/dry-run.md) policy was asked not to. Both record and neither
+acts, which is exactly why they are labelled differently.
 
 **Audit log:** Every create, update, delete, and toggle is written to `policy_audit_log` with the customer ID, timestamp, and full before/after diff. Query it directly in Postgres for forensic review.
 

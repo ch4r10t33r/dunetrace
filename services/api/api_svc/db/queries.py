@@ -20,6 +20,7 @@ except ImportError:
     asyncpg = None  # type: ignore
 
 from api_svc.config import settings
+from api_svc.explain_common import _get_step_range
 from dunetrace.models import FailureSignal, FailureType, Severity
 from explainer_svc.explainer import coerce_failure_type, explain
 
@@ -734,6 +735,22 @@ async def list_runs(
     return results, total or 0
 
 
+def _focus_range(evidence: dict, failure_type: str, step_index: int) -> dict:
+    """The step span a signal points at, as {first_step, last_step}.
+
+    Thin wrapper over the explainer's _get_step_range so there is exactly one
+    per-detector mapping in the codebase. Most detectors have no range and
+    collapse to the signal's own step; the ten that span a window
+    (TOOL_LOOP, CONTEXT_BLOAT, ...) name their own evidence keys.
+    """
+    fallback = step_index if isinstance(step_index, int) else 0
+    try:
+        first, last = _get_step_range(evidence or {}, failure_type, fallback)
+    except Exception:  # a malformed evidence dict must not break run detail
+        first = last = fallback
+    return {"first_step": first, "last_step": last}
+
+
 async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False) -> Optional[dict]:
     """Full run detail: metadata + events + signals with explanations.
     Returns None if the run doesn't exist OR belongs to a different org."""
@@ -788,6 +805,19 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         # NULL for runs that predate this migration or never had a
         # conversation_id at all, same "instrumentation-dependent, may be
         # absent" tolerance as trace_id/system_prompt elsewhere.
+        dry_run_rows = await conn.fetch(
+            """
+            SELECT policy_id, policy_name, step_index, would_action_type,
+                   would_action_params, matched_branch, reason, evaluated_at
+              FROM policy_evaluations
+             WHERE org_id = $1 AND run_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+             ORDER BY step_index NULLS LAST, evaluated_at
+            """,
+            org_id,
+            run_id,
+        )
+
         run_row = await conn.fetchrow(
             "SELECT conversation_id FROM runs WHERE run_id = $1 AND org_id = $2",
             run_id,
@@ -818,6 +848,24 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         )
 
     # Build signal list with explanations
+    dry_run_verdicts = [
+        {
+            "policy_id": r["policy_id"],
+            "policy_name": r["policy_name"],
+            "step_index": r["step_index"],
+            "would_action_type": r["would_action_type"],
+            "would_action_params": (
+                json.loads(r["would_action_params"])
+                if isinstance(r["would_action_params"], str)
+                else r["would_action_params"]
+            ),
+            "matched_branch": r["matched_branch"],
+            "reason": r["reason"],
+            "at": r["evaluated_at"].timestamp() if r["evaluated_at"] else None,
+        }
+        for r in dry_run_rows
+    ]
+
     signal_list = []
     for s in signals:
         evidence = s["evidence"]
@@ -857,6 +905,18 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
                 "confidence": s["confidence"],
                 "detected_at": detected_at,
                 "evidence": dict(evidence) if evidence else {},
+                # Which steps to put in focus when this signal is the entry
+                # point. Computed here, not in the page: the evidence key
+                # holding the step range differs per detector
+                # (_STEP_RANGE_FIELDS), and a second copy of that mapping in
+                # the dashboard would drift the moment a detector changes its
+                # evidence shape — and would drift silently, focusing the
+                # wrong step rather than failing.
+                "focus": _focus_range(
+                    dict(evidence) if evidence else {},
+                    s["failure_type"],
+                    s["step_index"],
+                ),
                 "shadow": s["shadow"],
                 "title": exp.title if exp else s["failure_type"],
                 "what": exp.what if exp else "",
@@ -909,6 +969,11 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         "cost_usd": cost_usd,
         "events": event_list,
         "signals": signal_list,
+        # What a dry-run policy would have done on THIS run, beside the step
+        # that triggered it. A verdict read on its own is a claim; a verdict
+        # read next to the tool arguments that caused it is evidence, and that
+        # is what gets someone to turn enforcement on.
+        "dry_run_verdicts": dry_run_verdicts,
         "conversation_id": conversation_id,
     }
 
@@ -3980,6 +4045,41 @@ async def get_signal_fix_status(
 # ── Policies ─────────────────────────────────────────────────────────────────
 
 
+#: Actions the SDK will refuse to honour from an unverifiable remote policy.
+#: Mirrors ENFORCING_ACTIONS in the SDK's policies module; imported rather than
+#: duplicated so the two cannot drift.
+from dunetrace.policies import ENFORCING_ACTIONS as _ENFORCING_ACTIONS
+
+
+def _enforcement_state(action: dict, signature: str, enabled: bool) -> dict:
+    """Will this policy enforce, and if not, what fixes it.
+
+    Three states, deliberately distinct:
+      enforcing  — it will do what it says
+      log_only   — it records and does nothing, because that is what was asked
+      degraded   — it records and does nothing, and that is NOT what was asked
+
+    The third is the one worth surfacing. Everything else looks identical in a
+    policy list.
+    """
+    action_type = (action or {}).get("type", "log")
+    if not enabled:
+        return {"enforcement": "disabled", "enforcement_reason": ""}
+    if action_type not in _ENFORCING_ACTIONS:
+        return {"enforcement": "log_only", "enforcement_reason": ""}
+    if not signature:
+        return {
+            "enforcement": "degraded",
+            "enforcement_reason": (
+                f"This policy asks for {action_type!r} but is unsigned, so every SDK "
+                f"downgrades it to log-only and it enforces nothing. Set "
+                f"POLICY_SIGNING_SECRET on the server and DUNETRACE_POLICY_SECRET on "
+                f"the agent, then re-save the policy to sign it."
+            ),
+        }
+    return {"enforcement": "enforcing", "enforcement_reason": ""}
+
+
 def _policy_row(r: Any) -> dict:
     import json as _json
 
@@ -4001,49 +4101,30 @@ def _policy_row(r: Any) -> dict:
         "priority": r["priority"],
         "signature": r.get("signature", "") or "",
         "sig_version": r.get("sig_version", 1) or 1,
+        # "enforcing" | "dry_run". Read from the row rather than defaulted, or
+        # a dry-run policy reads back as enforcing and the dashboard renders no
+        # dry-run card for it at all.
+        "mode": r.get("mode") or "enforcing",
+        # Whether this policy will actually enforce once an SDK loads it, and
+        # why not when it will not. The SDK downgrades an enforcing remote
+        # policy to log-only when it cannot verify the origin, and rewrites the
+        # action in place — so from the dashboard a downgraded policy looked
+        # exactly like one deliberately set to log. That is server-knowable:
+        # an unsigned policy (POLICY_SIGNING_SECRET unset here) is downgraded
+        # by every SDK that loads it.
+        **_enforcement_state(act, r.get("signature", "") or "", r["enabled"]),
         "created_at": ca.timestamp() if hasattr(ca, "timestamp") else ca,
         "updated_at": ua.timestamp() if hasattr(ua, "timestamp") else ua,
     }
 
 
-def _policy_canonical(
-    version: int,
-    policy_id: int,
-    agent_id: str,
-    name: str,
-    condition: dict,
-    action: dict,
-    enabled: bool,
-    priority: int,
-) -> str:
-    """Versioned canonical string for the policy HMAC. MUST stay in exact sync
-    with the SDK's ``_policy_canonical`` (dunetrace/policies/__init__.py):
-      v1 — original 7 fields, null-byte separated (byte-identical to pre-feature).
-      v2 — same fields with an authenticated "v2" domain-separation prefix; used
-           for policies carrying a condition.match expression block.
-    condition is JSON-dumped with sort_keys, so the nested `match` block is
-    already covered by the signature under either version."""
-    fields = [
-        str(policy_id),
-        agent_id,
-        name,
-        _json_mod.dumps(condition, sort_keys=True),
-        _json_mod.dumps(action, sort_keys=True),
-        str(enabled),
-        str(priority),
-    ]
-    if version >= 2:
-        fields.insert(0, "v%d" % version)
-    return "\x00".join(fields)
-
-
-def _sig_version_for(condition: dict) -> int:
-    """The minimum canonical-form version representing this condition: v2 when it
-    uses a `match` expression block, else v1 (keeps legacy policies byte-identical
-    and older SDKs able to verify them)."""
-    if isinstance(condition, dict) and condition.get("match") is not None:
-        return 2
-    return 1
+# The canonical string and version selector are IMPORTED from the SDK rather
+# than duplicated here. They were two copies with a "MUST stay in exact sync"
+# comment on each, which is a standing invitation to drift: the two disagreeing
+# does not fail loudly, it makes every signature mismatch and every remote
+# policy silently stop enforcing. One definition cannot disagree with itself.
+from dunetrace.policies import _policy_canonical  # noqa: E402
+from dunetrace.policies import sig_version_for_condition as _sig_version_for  # noqa: E402
 
 
 def _sign_policy(
@@ -4055,6 +4136,7 @@ def _sign_policy(
     enabled: bool,
     priority: int,
     secret: str,
+    mode: str = "enforcing",
 ) -> tuple:
     """HMAC-SHA256 over the versioned canonical policy fields. Returns
     ``(signature, sig_version)``; signature is '' when secret is empty (dev mode),
@@ -4062,11 +4144,11 @@ def _sign_policy(
 
     Must stay in sync with _verify_policy_signature in the SDK's policies.py.
     """
-    version = _sig_version_for(condition)
+    version = _sig_version_for(condition, mode)
     if not secret:
         return "", version
     canonical = _policy_canonical(
-        version, policy_id, agent_id, name, condition, action, enabled, priority
+        version, policy_id, agent_id, name, condition, action, enabled, priority, mode
     )
     return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest(), version
 
@@ -4168,6 +4250,135 @@ async def fetch_policy_evaluations(org_id: str, policy_id: int, limit: int = 100
     return [_policy_eval_row(r) for r in rows]
 
 
+async def fetch_dry_run_summary(org_id: str, policy_id: int, days: int = 14) -> dict:
+    """Everything the dry-run card needs, computed here rather than in the page.
+
+    The dashboard has a standing rule against deriving metrics client-side: the
+    bugs it produced were all a numerator and a denominator drawn from
+    different populations. This is exactly that shape of number, so the ratio
+    is computed in one query against one window.
+
+    `would_fire_runs` counts DISTINCT run_id, not rows. A dry-run `log` policy
+    records on every match, so a row count would report a policy firing forty
+    times on four runs and read as far noisier than it is. The question the
+    card answers is "how many runs would this have acted on".
+    """
+    empty = {
+        "policy_id": policy_id,
+        "window_days": days,
+        "would_fire_runs": 0,
+        "total_runs": 0,
+        "fire_rate": None,
+        "would_action_type": None,
+        "would_action_params": None,
+        "branches": [],
+        "samples": [],
+        "first_seen": None,
+        "last_seen": None,
+    }
+    if not _pool:
+        return empty
+
+    async with _pool.acquire() as conn:
+        head = await conn.fetchrow(
+            """
+            WITH win AS (
+                SELECT run_id, agent_id, would_action_type, would_action_params,
+                       matched_branch, evaluated_at
+                  FROM policy_evaluations
+                 WHERE org_id = $1 AND policy_id = $2
+                   AND mode = 'dry_run' AND fired = TRUE
+                   AND evaluated_at > NOW() - ($3 || ' days')::interval
+            )
+            SELECT COUNT(DISTINCT run_id)                        AS would_fire_runs,
+                   MIN(evaluated_at)                             AS first_seen,
+                   MAX(evaluated_at)                             AS last_seen,
+                   (ARRAY_AGG(would_action_type  ORDER BY evaluated_at DESC))[1] AS action_type,
+                   (ARRAY_AGG(would_action_params ORDER BY evaluated_at DESC))[1] AS action_params,
+                   (ARRAY_AGG(agent_id           ORDER BY evaluated_at DESC))[1] AS agent_id
+              FROM win
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+        if head is None or not head["would_fire_runs"]:
+            return empty
+
+        # Denominator from the same agent and the same window as the numerator.
+        total_runs = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM runs
+             WHERE org_id = $1 AND agent_id = $2
+               AND started_at > NOW() - ($3 || ' days')::interval
+            """,
+            org_id,
+            head["agent_id"] or "",
+            str(days),
+        )
+        branches = await conn.fetch(
+            """
+            SELECT matched_branch AS branch, COUNT(DISTINCT run_id) AS runs
+              FROM policy_evaluations
+             WHERE org_id = $1 AND policy_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+               AND matched_branch IS NOT NULL
+               AND evaluated_at > NOW() - ($3 || ' days')::interval
+             GROUP BY matched_branch
+             ORDER BY runs DESC
+             LIMIT 5
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+        samples = await conn.fetch(
+            """
+            SELECT DISTINCT ON (run_id) run_id, agent_id, step_index, evaluated_at
+              FROM policy_evaluations
+             WHERE org_id = $1 AND policy_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+               AND evaluated_at > NOW() - ($3 || ' days')::interval
+             ORDER BY run_id, evaluated_at DESC
+             LIMIT 5
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+
+    fired = int(head["would_fire_runs"] or 0)
+    total = int(total_runs or 0)
+    params = head["action_params"]
+    if isinstance(params, str):
+        params = _json_mod.loads(params)
+    return {
+        "policy_id": policy_id,
+        "window_days": days,
+        "would_fire_runs": fired,
+        "total_runs": total,
+        # None rather than 0 when the denominator is unknown: a rate of "0%"
+        # and "no runs to compare against" are different answers.
+        "fire_rate": round(fired / total, 4) if total else None,
+        "would_action_type": head["action_type"],
+        "would_action_params": params,
+        "branches": [{"branch": b["branch"], "runs": int(b["runs"])} for b in branches],
+        "samples": [
+            {
+                "run_id": s["run_id"],
+                # The run-detail view is addressed by (run_id, agent_id), so a
+                # sample that cannot be opened is not much of a sample.
+                "agent_id": s["agent_id"],
+                "step_index": s["step_index"],
+                "at": s["evaluated_at"].timestamp() if s["evaluated_at"] else None,
+            }
+            for s in samples
+        ],
+        "first_seen": head["first_seen"].timestamp() if head["first_seen"] else None,
+        "last_seen": head["last_seen"].timestamp() if head["last_seen"] else None,
+    }
+
+
 async def create_policy(
     org_id: str,
     name: str,
@@ -4176,6 +4387,7 @@ async def create_policy(
     action: dict,
     priority: int = 100,
     enabled: bool = True,
+    mode: str = "enforcing",
 ) -> dict:
     if not _pool:
         raise RuntimeError("DB pool not available")
@@ -4184,8 +4396,9 @@ async def create_policy(
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
-                INSERT INTO policies (name, agent_id, condition, action, priority, enabled, org_id)
-                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
+                INSERT INTO policies
+                    (name, agent_id, condition, action, priority, enabled, org_id, mode)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7, $8)
                 RETURNING *
                 """,
                 name,
@@ -4195,6 +4408,7 @@ async def create_policy(
                 priority,
                 enabled,
                 org_id,
+                mode,
             )
             # Signature is over policy identity/behavior fields only — org_id is a
             # tenancy filter, not part of the policy's cryptographic identity, and
@@ -4209,6 +4423,7 @@ async def create_policy(
                 enabled,
                 priority,
                 settings.POLICY_SIGNING_SECRET,
+                mode,
             )
             row = await conn.fetchrow(
                 "UPDATE policies SET signature = $1, sig_version = $2 WHERE id = $3 RETURNING *",

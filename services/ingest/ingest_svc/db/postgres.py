@@ -839,6 +839,18 @@ async def insert_policy_evaluations(events: list, batch_id: str, org_id: str) ->
                     float(p.get("ts") or getattr(e, "timestamp", 0.0) or 0.0),
                     None if bundle_stale is None else bool(bundle_stale),
                     None if bundle_age is None else float(bundle_age),
+                    # Dry-run verdict fields (migration 14). All nullable: an
+                    # SDK older than this ships none of them, and NULL is the
+                    # honest reading of "this row does not know".
+                    p.get("mode"),
+                    p.get("step_index"),
+                    p.get("would_action_type"),
+                    (
+                        json.dumps(p["would_action_params"])
+                        if p.get("would_action_params") is not None
+                        else None
+                    ),
+                    p.get("matched_branch"),
                 )
             )
         if not rows:
@@ -849,9 +861,11 @@ async def insert_policy_evaluations(events: list, batch_id: str, org_id: str) ->
                 INSERT INTO policy_evaluations
                     (org_id, policy_id, policy_name, agent_id, run_id, trigger_name,
                      trigger_matched, fired, sampled, reason, conditions, evaluated_at,
-                     policy_bundle_stale, policy_bundle_age_s)
+                     policy_bundle_stale, policy_bundle_age_s,
+                     mode, step_index, would_action_type, would_action_params,
+                     matched_branch)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
-                        to_timestamp($12), $13, $14)
+                        to_timestamp($12), $13, $14, $15, $16, $17, $18::jsonb, $19)
                 """,
                 rows,
             )

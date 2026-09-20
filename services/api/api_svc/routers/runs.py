@@ -131,6 +131,7 @@ async def get_run(
         cost_usd=data.get("cost_usd"),
         events=[RunEvent(**e) for e in data["events"]],
         signals=[RunSignal(**s) for s in data["signals"]],
+        dry_run_verdicts=data.get("dry_run_verdicts") or [],
         conversation_id=data.get("conversation_id"),
     )
 

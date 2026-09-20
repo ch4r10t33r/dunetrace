@@ -586,6 +586,52 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 .policy-toggle.off{background:var(--wire2)}
 .policy-name{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--chalk);min-width:180px}
 .policy-rule{font-size:12px;color:var(--chalk3);flex:1;font-family:'IBM Plex Mono',monospace}
+/* Dry run: the card sits directly under its policy row and reads as one unit
+   with it, not as a separate panel. Muted on purpose — a policy that is not
+   enforcing should not compete visually with one that is. */
+/* Signal → step context. Reads as a continuation of the signal card that
+   opened it, not as a separate tool. Focused steps are lit; the context steps
+   either side are dimmed so the eye lands on the right one. */
+.sig-focus-btn{margin-top:.6rem;background:none;border:1px solid var(--wire);color:var(--blue);font-family:'IBM Plex Mono',monospace;font-size:10px;padding:4px 8px;border-radius:3px;cursor:pointer}
+.sig-focus-btn:hover{border-color:var(--blue)}
+.focus-wrap{margin-top:1.5rem;background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem}
+.focus-nav{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.9rem}
+.focus-tab{background:var(--s2);border:1px solid var(--wire);color:var(--chalk4);font-family:'IBM Plex Mono',monospace;font-size:10px;padding:3px 9px;border-radius:3px;cursor:pointer}
+.focus-tab.on{border-color:var(--orange);color:var(--orange)}
+.focus-why{background:var(--s2);border-left:2px solid var(--orange);padding:.7rem .9rem;border-radius:3px;margin-bottom:1rem}
+.focus-why-h{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--orange);margin-bottom:.35rem}
+.focus-why-b{font-size:12px;color:var(--chalk2);line-height:1.5}
+.focus-ev{margin-top:.5rem;font-size:10px;color:var(--chalk4);line-height:1.7}
+.focus-evk{color:var(--blue)}
+.focus-step{border:1px solid var(--wire);border-radius:5px;padding:.6rem .8rem;margin-bottom:.5rem;opacity:.55}
+.focus-step.on{opacity:1;border-color:var(--orange);background:var(--s2)}
+.focus-step-h{display:flex;align-items:center;gap:.6rem;margin-bottom:.4rem}
+.focus-step-n{font-size:10px;color:var(--chalk4);letter-spacing:1px;text-transform:uppercase}
+.focus-step-t{font-size:11px;color:var(--chalk2)}
+.focus-step-badge{font-size:8px;letter-spacing:1px;background:var(--orange);color:#fff;padding:1px 6px;border-radius:2px}
+.focus-field{display:flex;gap:.6rem;font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.6;align-items:baseline}
+.focus-fk{color:var(--chalk4);min-width:96px;flex-shrink:0}
+.focus-fv{color:var(--chalk2);word-break:break-word;white-space:pre-wrap}
+.focus-trunc{color:var(--chalk4);font-style:italic}
+.focus-verdict{margin-top:.5rem;padding:.45rem .7rem;background:rgba(120,140,170,.12);border:1px solid rgba(120,140,170,.3);border-radius:3px;font-size:11px;color:var(--chalk2)}
+.focus-verdict-tag{font-size:8px;letter-spacing:1px;color:var(--blue);border:1px solid rgba(120,140,170,.45);padding:1px 5px;border-radius:2px;margin-right:.5rem}
+.focus-gap{text-align:center;font-size:10px;color:var(--chalk4);padding:.6rem;border:1px dashed var(--wire);border-radius:4px;margin-bottom:.5rem}
+.focus-empty{font-size:11px;color:var(--chalk4)}
+.policy-mode-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;padding:2px 8px;border-radius:2px;text-transform:uppercase;letter-spacing:1px;flex-shrink:0}
+.policy-mode-badge.dry{background:rgba(120,140,170,.18);color:var(--blue);border:1px solid rgba(120,140,170,.35)}
+.policy-mode-badge.degraded{background:rgba(200,120,40,.18);color:var(--orange);border:1px solid rgba(200,120,40,.45)}
+.dryrun-card{margin:-2px 0 .75rem 0;padding:.75rem 1rem .85rem;background:var(--s1);border:1px solid var(--wire);border-top:none;border-radius:0 0 6px 6px}
+.dryrun-loading,.dryrun-empty{font-size:11px;color:var(--chalk4);line-height:1.5}
+.dryrun-head{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap}
+.dryrun-stat{font-family:'IBM Plex Mono',monospace;font-size:20px;font-weight:600;color:var(--chalk1)}
+.dryrun-of{font-size:11px;color:var(--chalk4)}
+.dryrun-promote{margin-left:auto;font-size:10px;padding:4px 10px}
+.dryrun-row{display:flex;gap:.6rem;font-size:11px;line-height:1.7;align-items:baseline}
+.dryrun-k{color:var(--chalk4);min-width:82px;flex-shrink:0;text-transform:uppercase;font-size:9px;letter-spacing:1px}
+.dryrun-v{color:var(--chalk2);word-break:break-word}
+.dryrun-n{color:var(--chalk4)}
+.dryrun-v a{color:var(--blue);text-decoration:none}
+.dryrun-v a:hover{text-decoration:underline}
 .policy-action-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;padding:2px 8px;border-radius:2px;text-transform:uppercase;letter-spacing:1px;flex-shrink:0}
 .pa-stop{background:rgba(229,62,62,.12);color:var(--red)}
 .pa-switch{background:rgba(212,146,10,.12);color:var(--amber)}
@@ -1098,6 +1144,8 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="signals-grid" id="detail-signals-grid">
       <div class="loading" style="grid-column:1/-1">loading…</div>
     </div>
+    <!-- Signal → step context. Hidden until a run with signals loads. -->
+    <div class="focus-wrap" id="detail-focus" style="display:none"></div>
     <!-- Delegation graph. Rendered by renderDelegationGraph() only when this run
          carries a DELEGATION_LOOP signal; hidden (and empty) for every other
          run, so nothing here costs anything on the common path. -->
@@ -2043,6 +2091,9 @@ const ACTIONS = {
   closePatternModal,
   updateTrendDeltas,
   copyRunId,
+  promotePolicy,
+  loadDryRunSummary,
+  focusSignal,
   explainSignal,
   openPROnGitHub,
   runReplay,
@@ -3092,6 +3143,10 @@ async function showDetail(runId, agentId) {
     // run that had actually failed. A false clean verdict is the worst error an
     // observability tool can make, and the correct data was already in hand.
     const runData = await apiFetch('/v1/runs/' + encodeURIComponent(runId));
+    // Held for the focus view, which re-renders when you move between signals
+    // without refetching the run.
+    _curRunData = runData;
+    _focusSignalId = null;
     const events  = runData.events || [];
     const signals = runData.signals || [];
     renderRunDetail(runData, events, signals);
@@ -3258,8 +3313,136 @@ function renderSignalCards(signals) {
       <div class="score-bar-track"><div class="score-bar-fill ${cls}" style="width:${Math.round(c*100)}%"></div></div>
       <div style="font-size:11px;color:var(--chalk4);margin-top:6px">${esc(evid)}</div>
       <div id="verdict-${attr(s.id)}">${verdictBadgeHtml(fixVerdicts[s.id])}</div>
+      <button class="sig-focus-btn" ${actionAttrs('focusSignal', s.id)}>Show me the step →</button>
     </div>`;
   }).join('');
+}
+
+// ── Signal → step context ─────────────────────────────────────────────────────
+//
+// A fired signal says something went wrong. This says what the step actually
+// contained. Scope is deliberately narrow: not a trace browser, not search.
+// The signal is the entry point and the answer is the steps around it.
+//
+// The focus range comes from the API (signal.focus), not from reading evidence
+// here. Which evidence key holds the step span differs per detector, and a
+// second copy of that mapping in this file would drift silently — focusing the
+// wrong step rather than failing.
+
+let _curRunData    = null;
+let _focusSignalId = null;
+const FOCUS_CONTEXT = 2;    // steps of context either side of the focus range
+const MAX_FOCUS_EVENTS = 40;   // hard cap on step cards; middle collapses
+
+function focusSignal(signalId) {
+  _focusSignalId = signalId;
+  renderFocus();
+  const el = document.getElementById('detail-focus');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function stepSummary(ev) {
+  // What the detector saw, per event type. Only the fields that type carries.
+  const p = ev.payload || {};
+  switch (ev.event_type) {
+    case 'tool.called':     return [['tool', p.tool_name], ['args', p.args]];
+    case 'tool.responded':  return [['tool', p.tool_name], ['ok', String(p.success)],
+                                    ['error', p.error], ['output', p.output],
+                                    ['output_length', p.output_length]];
+    case 'llm.called':      return [['model', p.model], ['prompt_tokens', p.prompt_tokens]];
+    case 'llm.responded':   return [['finish', p.finish_reason], ['completion_tokens', p.completion_tokens],
+                                    ['latency_ms', p.latency_ms], ['output', p.output]];
+    case 'retrieval.called':    return [['index', p.index_name], ['query', p.query]];
+    case 'retrieval.responded': return [['index', p.index_name], ['results', p.result_count],
+                                        ['top_score', p.top_score], ['content', p.content]];
+    case 'memory.written':  return [['key', p.key], ['source', p.source], ['value', p.value]];
+    case 'memory.read':     return [['key', p.key]];
+    case 'run.started':     return [['model', p.model], ['tools', (p.tools || []).join(', ')],
+                                    ['input', p.input_text]];
+    case 'run.completed':   return [['exit', p.exit_reason], ['steps', p.total_steps]];
+    case 'run.errored':     return [['error', p.error], ['type', p.error_type]];
+    case 'external.signal': return [['signal', p.signal_name], ['source', p.source]];
+    default:                return Object.entries(p).slice(0, 6);
+  }
+}
+
+function focusFieldHtml(k, v) {
+  if (v === undefined || v === null || v === '') return '';
+  let s = typeof v === 'string' ? v : JSON.stringify(v);
+  const long = s.length > 400;
+  if (long) s = s.slice(0, 400) + '…';
+  return `<div class="focus-field"><span class="focus-fk">${esc(k)}</span>` +
+         `<span class="focus-fv">${esc(s)}${long ? ' <span class="focus-trunc">(truncated)</span>' : ''}</span></div>`;
+}
+
+function renderFocus() {
+  const wrap = document.getElementById('detail-focus');
+  if (!wrap) return;
+  const signals = _curRunData?.signals || [];
+  if (!signals.length) { wrap.style.display = 'none'; return; }
+
+  const sig = signals.find(s => s.id === _focusSignalId) || signals[0];
+  _focusSignalId = sig.id;
+  const focus = sig.focus || { first_step: sig.step_index, last_step: sig.step_index };
+  const lo = Math.min(focus.first_step, focus.last_step);
+  const hi = Math.max(focus.first_step, focus.last_step);
+
+  let events = (_curRunData.events || [])
+    .filter(e => e.step_index >= lo - FOCUS_CONTEXT && e.step_index <= hi + FOCUS_CONTEXT);
+
+  // Runs with many steps stay usable. The window bounds most cases already,
+  // but a detector whose evidence spans the whole run (a scattershot pattern
+  // across 400 steps) would otherwise put 400 step cards in the DOM and make
+  // the view useless exactly when it is most needed. Head and tail, with the
+  // middle collapsed and counted.
+  let omitted = 0;
+  if (events.length > MAX_FOCUS_EVENTS) {
+    const keep = Math.floor(MAX_FOCUS_EVENTS / 2);
+    omitted = events.length - keep * 2;
+    events = events.slice(0, keep).concat([{ _gap: omitted }], events.slice(-keep));
+  }
+  const verdicts = _curRunData.dry_run_verdicts || [];
+
+  wrap.style.display = 'block';
+  wrap.innerHTML = `
+    <div class="sec-head" style="margin-bottom:.75rem">
+      <span class="sec-title">What happened at step ${esc(String(lo))}${hi !== lo ? '–' + esc(String(hi)) : ''}</span>
+    </div>
+    ${signals.length > 1 ? `<div class="focus-nav mono">${signals.map(s =>
+        `<button class="focus-tab ${s.id === sig.id ? 'on' : ''}" ${actionAttrs('focusSignal', s.id)}>${esc(s.failure_type)}</button>`
+      ).join('')}</div>` : ''}
+    <div class="focus-why">
+      <div class="focus-why-h mono">Why ${esc(sig.failure_type)} fired here</div>
+      <div class="focus-why-b">${esc(evidenceSummary(sig))}</div>
+      ${Object.keys(sig.evidence || {}).length ? `<div class="focus-ev mono">${
+        Object.entries(sig.evidence).slice(0, 8).map(([k, v]) =>
+          `<span class="focus-evk">${esc(k)}</span> ${esc(typeof v === 'string' ? v : JSON.stringify(v))}`
+        ).join('<br>')}</div>` : ''}
+    </div>
+    ${events.length ? events.map(ev => {
+      if (ev._gap) return `<div class="focus-gap mono">… ${esc(String(ev._gap))} more steps in this range, not shown …</div>`;
+      const inFocus = ev.step_index >= lo && ev.step_index <= hi;
+      const v = verdicts.filter(x => x.step_index === ev.step_index);
+      return `<div class="focus-step ${inFocus ? 'on' : ''}">
+        <div class="focus-step-h mono">
+          <span class="focus-step-n">step ${esc(String(ev.step_index))}</span>
+          <span class="focus-step-t">${esc(ev.event_type)}</span>
+          ${inFocus ? '<span class="focus-step-badge">TRIGGERED HERE</span>' : ''}
+        </div>
+        ${stepSummary(ev).map(([k, val]) => focusFieldHtml(k, val)).join('')}
+        ${v.map(x => `<div class="focus-verdict mono">
+          <span class="focus-verdict-tag">DRY RUN</span>
+          <b>${esc(x.policy_name)}</b> would have ${esc(x.would_action_type)}${
+            x.would_action_params ? ' — ' + esc(Object.entries(x.would_action_params).map(([a,b]) => a+'='+b).join(' ')) : ''
+          }${x.matched_branch ? ` <span class="focus-evk">on ${esc(x.matched_branch)}</span>` : ''}
+        </div>`).join('')}
+      </div>`;
+    }).join('') : `<div class="focus-empty mono">No events stored for these steps.</div>`}
+    ${verdicts.filter(x => x.step_index === null || x.step_index === undefined).map(x =>
+      `<div class="focus-verdict mono" style="margin-top:.5rem">
+        <span class="focus-verdict-tag">DRY RUN</span>
+        <b>${esc(x.policy_name)}</b> would have ${esc(x.would_action_type)} on this run (step not recorded)
+      </div>`).join('')}`;
 }
 
 let _explainSignalId   = null;
@@ -3268,6 +3451,7 @@ let _explainStaticLang = 'python';
 let _explainLastData   = null;   // last explain API response, used by openPROnGitHub()
 
 function renderExplain(signals) {
+  renderFocus();
   const explainRow    = document.getElementById('explain-row');
   const explainResult = document.getElementById('explain-result');
 
@@ -5283,10 +5467,95 @@ function renderPolicies() {
       <div class="policy-name">${esc(p.name)}</div>
       <div class="policy-rule mono">${esc(policyRuleText(p))}</div>
       <div class="policy-action-badge ${actionBadgeClass(aType)}">${esc(actionLabel(p))}</div>
+      ${modeBadge(p)}
       ${p.agent_id !== '*' ? `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);padding:2px 8px;background:var(--s2);border-radius:2px">${esc(p.agent_id)}</div>` : ''}
       <button class="policy-del" title="Delete" ${actionAttrs('deletePolicy', p.id)}>✕</button>
-    </div>`;
+    </div>
+    ${p.mode === 'dry_run' ? `<div class="dryrun-card" id="dryrun-${esc(String(p.id))}">
+      <div class="dryrun-loading mono">Loading what this would have done…</div>
+    </div>` : ''}`;
   }).join('');
+  // Each dry-run policy loads its own summary. Sequential on purpose: a page
+  // with a dozen dry-run policies should not open a dozen parallel requests.
+  _policies.filter(p => p.mode === 'dry_run').reduce(
+    (chain, p) => chain.then(() => loadDryRunSummary(p.id)), Promise.resolve());
+}
+
+// ── Dry run ───────────────────────────────────────────────────────────────────
+//
+// One card per dry-run policy, answering "is this correctly tuned" without
+// opening anything else: how often it would have fired, out of what, doing
+// what, matched on what, and on which runs.
+//
+// Every number here is read from the API, never derived in the page. The rule
+// exists because the dashboard bugs worth remembering were all a locally
+// computed ratio whose numerator and denominator came from different
+// populations, and a fire rate is exactly that shape.
+
+function modeBadge(p) {
+  if (p.mode === 'dry_run') {
+    return `<div class="policy-mode-badge dry" title="Evaluates and records, enforces nothing">DRY RUN</div>`;
+  }
+  if (p.enforcement === 'degraded') {
+    return `<div class="policy-mode-badge degraded" title="${attr(p.enforcement_reason || '')}">DEGRADED</div>`;
+  }
+  return '';
+}
+
+function pct(rate) {
+  // null means "no runs in the window to compare against", which is a
+  // different answer from 0% and must not render as one.
+  return rate === null || rate === undefined ? '—' : (rate * 100).toFixed(1) + '%';
+}
+
+async function loadDryRunSummary(policyId, days) {
+  const el = document.getElementById('dryrun-' + policyId);
+  if (!el) return;
+  const win = days || 14;
+  try {
+    const s = await apiFetch(`/v1/policies/${policyId}/dry-run-summary?days=${win}`);
+    el.innerHTML = renderDryRunSummary(s);
+  } catch (e) {
+    el.innerHTML = `<div class="dryrun-loading mono">Could not load dry-run verdicts: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderDryRunSummary(s) {
+  if (!s.would_fire_runs) {
+    return `<div class="dryrun-empty mono">
+      No firings in the last ${esc(String(s.window_days))} days. Either the condition is
+      not being met, or this agent has not run. Nothing to promote yet.
+    </div>`;
+  }
+  const params = s.would_action_params
+    ? Object.entries(s.would_action_params).map(([k, v]) => `${k}=${v}`).join(' ')
+    : '';
+  return `<div class="dryrun-head">
+      <span class="dryrun-stat">${esc(String(s.would_fire_runs))}</span>
+      <span class="dryrun-of mono">of ${esc(String(s.total_runs))} runs
+        (${esc(pct(s.fire_rate))}) in the last ${esc(String(s.window_days))} days</span>
+      <button class="btn-primary dryrun-promote" ${actionAttrs('promotePolicy', s.policy_id, s.policy_name)}>
+        Promote to enforcing
+      </button>
+    </div>
+    <div class="dryrun-row mono"><span class="dryrun-k">Would have</span>
+      <span class="dryrun-v">${esc(s.would_action_type || '—')}${params ? ' — ' + esc(params) : ''}</span></div>
+    ${s.branches.length ? `<div class="dryrun-row mono"><span class="dryrun-k">Matched on</span>
+      <span class="dryrun-v">${s.branches.map(b =>
+        `${esc(b.branch)} <span class="dryrun-n">(${esc(String(b.runs))})</span>`).join(' · ')}</span></div>` : ''}
+    ${s.samples.length ? `<div class="dryrun-row mono"><span class="dryrun-k">Runs</span>
+      <span class="dryrun-v">${s.samples.map(x =>
+        `<a href="#" ${actionAttrs('showDetail', x.run_id, x.agent_id)}>${esc(x.run_id.slice(0, 8))}</a>` +
+        (x.step_index === null || x.step_index === undefined ? '' : ` <span class="dryrun-n">step ${esc(String(x.step_index))}</span>`)
+      ).join(' · ')}</span></div>` : ''}`;
+}
+
+async function promotePolicy(id, name) {
+  if (!confirm(`Promote "${name}" to enforcing?\n\nIt will start acting on live runs. Its dry-run history is kept.`)) return;
+  try {
+    await apiPut(`/v1/policies/${id}`, { mode: 'enforcing' });
+    await loadAndRenderPolicies();
+  } catch (e) { alert('Promote failed: ' + e.message); }
 }
 
 async function togglePolicy(id) {

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import json
+
 import pytest
 
 
@@ -153,9 +155,62 @@ async def test_bundle_fields_are_written_from_the_payload(_pg_sink):
     assert "policy_bundle_stale" in sql and "policy_bundle_age_s" in sql
     assert "$13, $14" in sql
     (row,) = rows
-    assert len(row) == 14
+    # 14 original columns + the 5 dry-run verdict columns from migration 14.
+    assert len(row) == 19
     assert row[12] is True
     assert row[13] == 42.5
+
+
+@pytest.mark.asyncio
+async def test_dry_run_verdict_fields_are_written_from_the_payload(_pg_sink):
+    """The dry-run verdict is the whole output of dry-run mode. If any of these
+    five fails to reach the row, the dashboard cannot answer "what would this
+    policy have done" and the feature is decorative."""
+    from ingest_svc.db import postgres
+
+    n = await postgres.insert_policy_evaluations(
+        [
+            _event(
+                "policy.evaluated",
+                policy_id=7,
+                policy_name="cap-tools",
+                fired=True,
+                mode="dry_run",
+                step_index=3,
+                would_action_type="stop",
+                would_action_params={"message": "too many tools"},
+                matched_branch="tool_call_count",
+            )
+        ],
+        "batch-1",
+        "org-1",
+    )
+    assert n == 1
+    [(sql, rows)] = _pg_sink.calls
+    for col in ("mode", "step_index", "would_action_type", "would_action_params", "matched_branch"):
+        assert col in sql, f"{col} missing from the INSERT"
+    (row,) = rows
+    assert row[14] == "dry_run"
+    assert row[15] == 3
+    assert row[16] == "stop"
+    assert json.loads(row[17]) == {"message": "too many tools"}
+    assert row[18] == "tool_call_count"
+
+
+@pytest.mark.asyncio
+async def test_dry_run_fields_missing_from_payload_write_null(_pg_sink):
+    """An enforcing row, or one from an SDK predating dry run, knows none of
+    these. NULL is the honest value; a default would make an old row look like
+    one that really recorded them."""
+    from ingest_svc.db import postgres
+
+    n = await postgres.insert_policy_evaluations(
+        [_event("policy.evaluated", policy_id=1, fired=True)], "batch-1", "org-1"
+    )
+    assert n == 1
+    [(_sql, rows)] = _pg_sink.calls
+    (row,) = rows
+    assert row[14:19] == (None, None, None, None, None)
 
 
 @pytest.mark.asyncio

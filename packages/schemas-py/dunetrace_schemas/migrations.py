@@ -924,6 +924,50 @@ MIGRATIONS: List[Tuple[int, str, str]] = [
             ADD CONSTRAINT run_state_metrics_pkey PRIMARY KEY (org_id, run_id, state);
         """,
     ),
+    (
+        14,
+        "policy_dry_run",
+        # Dry run: a policy evaluates and records what it WOULD have done, and
+        # executes nothing. The reason nobody arms a policy is that they cannot
+        # see what it will do first; this is that preview.
+        #
+        # `policies.mode` defaults to 'enforcing', so every existing policy keeps
+        # behaving exactly as it does today and a new policy is armed unless its
+        # author says otherwise. Dry run is opt-in, deliberately: a guardrail
+        # that silently does nothing by default is the failure mode this whole
+        # workstream exists to remove.
+        #
+        # The verdict columns extend policy_evaluations rather than starting a
+        # second table. A dry-run verdict IS an evaluation, and one table keeps
+        # the promotion story intact: flipping mode changes nothing about the
+        # rows already written, so the history from before enforcement stays
+        # readable next to the history after it.
+        #
+        # Every added column is NULLable with no default backfill. Rows written
+        # before this migration genuinely do not know their step or their
+        # would-be action, and inventing a value would make an old row
+        # indistinguishable from a new one that really recorded those facts.
+        # NULL reads as "not recorded", which is the truth.
+        """
+        ALTER TABLE policies
+            ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'enforcing';
+
+        ALTER TABLE policy_evaluations
+            ADD COLUMN IF NOT EXISTS mode               TEXT,
+            ADD COLUMN IF NOT EXISTS step_index         INTEGER,
+            ADD COLUMN IF NOT EXISTS would_action_type  TEXT,
+            ADD COLUMN IF NOT EXISTS would_action_params JSONB,
+            ADD COLUMN IF NOT EXISTS matched_branch     TEXT;
+
+        -- The dashboard's dry-run view asks one question: for this policy, over
+        -- this window, how many times would it have fired and on which runs.
+        -- Partial, because dry-run rows are the only ones it reads and they are
+        -- a small slice of a table dominated by enforcing evaluations.
+        CREATE INDEX IF NOT EXISTS idx_policy_evals_dry_run
+            ON policy_evaluations(org_id, policy_id, evaluated_at DESC)
+            WHERE mode = 'dry_run' AND fired = TRUE;
+        """,
+    ),
 ]
 
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1][0]

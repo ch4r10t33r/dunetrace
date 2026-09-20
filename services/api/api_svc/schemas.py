@@ -78,6 +78,10 @@ if _PYDANTIC:
         confidence: float
         detected_at: float
         evidence: Dict[str, Any]
+        #: {first_step, last_step} — the span this signal points at. Computed
+        #: server-side from the detector's own evidence keys so the drill-down
+        #: view focuses the right steps without re-deriving the mapping.
+        focus: Dict[str, int] = {}
         shadow: bool = False
         title: str
         what: str
@@ -97,6 +101,9 @@ if _PYDANTIC:
         cost_usd: Optional[float] = None
         events: List[RunEvent]
         signals: List[RunSignal]
+        #: Policies in dry run that WOULD have fired on this run, with the step
+        #: they matched on. Shown beside that step in the drill-down view.
+        dry_run_verdicts: List[Dict[str, Any]] = []
         conversation_id: Optional[int] = None
 
     class ConversationRun(_Model):
@@ -650,6 +657,7 @@ else:
         step_count: int
         events: List[Any]
         signals: List[Any]
+        dry_run_verdicts: List[Any] = _field(default_factory=list)
         conversation_id: Optional[int] = None
 
         def model_dump(self):

@@ -207,6 +207,24 @@ def _omit_llm_output_text() -> bool:
 if TYPE_CHECKING:
     from dunetrace.client import Dunetrace
 
+# ── Dry-run verdict helpers ───────────────────────────────────────────────────
+
+
+def _matched_branch(trigger: str, conditions: list) -> str:
+    """A short label for what carried the match, for the verdict record.
+
+    Reading a verdict later, "would have stopped the run" is only useful next
+    to "because of what". The flat trigger and the expression comparisons are
+    the two halves a condition can match on, so the label names whichever were
+    present rather than reproducing the whole condition.
+    """
+    passed = [c.get("field_path") for c in conditions if c.get("result") and c.get("field_path")]
+    if trigger and trigger != "expression" and passed:
+        return f"{trigger} + " + " + ".join(passed)
+    if passed:
+        return " + ".join(passed)
+    return trigger or "expression"
+
 
 class RunContext:
     """Thin wrapper around a single agent run."""
@@ -1081,6 +1099,13 @@ class RunContext:
         reporting = getattr(self._client, "_policy_evaluation_reporting", False)
         if eval_logger.isEnabledFor(logging.DEBUG) or reporting:
             return self._observe_policy_eval
+        # A dry-run policy's verdicts are the whole output of the feature, so
+        # they cannot sit behind the evaluation-reporting opt-in the way
+        # ordinary observability does. Someone putting a policy in dry run has
+        # already asked for exactly this record.
+        engine = getattr(self._client, "_policy_engine", None)
+        if engine is not None and engine.has_dry_run():
+            return self._observe_policy_eval
         return None
 
     def _observe_policy_eval(self, policy, trigger_matched: bool, trace: list, fired: bool) -> None:
@@ -1091,12 +1116,38 @@ class RunContext:
             client = self._client
             log_on = eval_logger.isEnabledFor(logging.DEBUG)
             ship_on = getattr(client, "_policy_evaluation_reporting", False)
-            if not (log_on or ship_on):
+
+            # A dry-run FIRING is the one record that must never be missed or
+            # sampled: the whole feature is "how many times would this have
+            # fired", and a sampled count answers that wrong. So it bypasses
+            # both the reporting opt-in and the rate limiter.
+            #
+            # Scoped to firings on purpose. A dry-run policy that evaluates and
+            # does not match is ordinary evaluation noise and follows the
+            # normal opt-in and sampling path, which keeps an unmatched policy
+            # on a hot loop from flooding the table for no added information.
+            # "and not already triggered" matters: in the observed path the
+            # engine calls this for every applicable policy on every tick, and
+            # only winner selection respects _triggered_policies. Without the
+            # check a dry-run stop would take the unsampled path on each
+            # subsequent tick and report six guaranteed firings for something
+            # enforcement would have done once. The intercept adds the key
+            # after this runs, so the first firing still gets the guarantee.
+            dry_run_firing = bool(
+                getattr(policy, "is_dry_run", False)
+                and fired
+                and policy.key not in self._triggered_policies
+            )
+
+            if not (log_on or ship_on or dry_run_firing):
                 return
-            limiter = getattr(client, "_policy_eval_rate_limiter", None)
-            admit, sampled = limiter.admit(policy.key) if limiter is not None else (True, False)
-            if not admit:
-                return
+            if dry_run_firing:
+                admit, sampled = True, False
+            else:
+                limiter = getattr(client, "_policy_eval_rate_limiter", None)
+                admit, sampled = limiter.admit(policy.key) if limiter is not None else (True, False)
+                if not admit:
+                    return
             conditions = [t.to_dict() for t in trace]
             trigger = policy.condition.get("trigger", "")
             reason = build_reason(trigger, trigger_matched, fired, conditions)
@@ -1136,6 +1187,11 @@ class RunContext:
                 policy_bundle_age_s=(round(bundle_age, 3) if bundle_age is not None else None),
                 detector_config_stale=config_stale,
                 detector_config_age_s=(round(config_age, 3) if config_age is not None else None),
+                mode=getattr(policy, "mode", None),
+                step_index=self.step,
+                would_action_type=(policy.action or {}).get("type", "log"),
+                would_action_params=((policy.action or {}).get("params") or None),
+                matched_branch=_matched_branch(trigger, conditions) if fired else None,
             )
             if log_on:
                 eval_logger.debug(
@@ -1144,7 +1200,12 @@ class RunContext:
                     reason,
                     extra={"policy_evaluation": record.to_dict()},
                 )
-            if ship_on:
+            if ship_on or dry_run_firing:
+                # A dry-run firing ships regardless of the reporting opt-in.
+                # The verdict is the only artefact the feature produces; if it
+                # depended on a flag most people have never set, a policy in
+                # dry run would look exactly like a policy doing nothing,
+                # which is the failure this whole workstream is removing.
                 self._ship_evaluation_record(record)
         except Exception as exc:  # observability is best-effort
             logger.debug("policy evaluation observability failed: %s", exc)
@@ -1324,6 +1385,33 @@ class RunContext:
         policy, action = result
         action_type = action.get("type", "log")
         params = action.get("params") or {}
+
+        if getattr(policy, "is_dry_run", False):
+            # The condition matched and the action is known. Record what would
+            # have happened and return before anything happens.
+            #
+            # Deliberately before the policy.triggered emit: that event is an
+            # enforcement record other systems act on, and a dry-run policy
+            # must be invisible to everything except the verdict log.
+            #
+            # Dedupe exactly as the enforcing path does, including the `log`
+            # exception. A dry-run verdict is a prediction of what enforcement
+            # would have done, so it has to inherit enforcement's once-per-run
+            # semantics: an enforcing stop fires once and ends the run, and a
+            # dry-run stop that recorded a verdict on every subsequent matching
+            # step would report six firings for something that would really
+            # have happened once. The dashboard question is "how many runs
+            # would this have stopped", and that only reads correctly if the
+            # counts line up one-to-one with enforcement.
+            if action_type != "log":
+                self._triggered_policies.add(policy.key)
+            logger.info(
+                "Policy '%s' [DRY RUN] would have %s at step %d — not executed",
+                policy.name,
+                action_type,
+                self.step,
+            )
+            return
 
         # Emit a policy.triggered event for all action types
         self._emit(

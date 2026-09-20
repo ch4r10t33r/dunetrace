@@ -68,6 +68,26 @@ class PolicyEvaluationRecord:
     # what the detector worker is applying right now.
     detector_config_stale: bool = False
     detector_config_age_s: Optional[float] = None
+    # ── Dry run (Phase 2) ────────────────────────────────────────────────────
+    # All five are Optional with no default backfill. A row written before dry
+    # run existed genuinely does not know its step or its would-be action, and
+    # filling a plausible value would make an old row indistinguishable from a
+    # new one that really recorded those facts. None reads as "not recorded".
+    #
+    # They are populated for enforcing rows too wherever they are known, so the
+    # schema reads the same either way and `mode` is the only thing that says
+    # whether the action actually ran.
+    #: "enforcing" | "dry_run". None on rows predating the field.
+    mode: Optional[str] = None
+    #: Run step the policy matched on.
+    step_index: Optional[int] = None
+    #: The action that would have executed. Same value as the action that DID
+    #: execute on an enforcing row — `mode` is what distinguishes them.
+    would_action_type: Optional[str] = None
+    #: Its params, verbatim, so a verdict is readable without the policy.
+    would_action_params: Optional[Dict[str, Any]] = None
+    #: Which part of the condition carried the match, for a composed condition.
+    matched_branch: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -86,6 +106,11 @@ class PolicyEvaluationRecord:
             "policy_bundle_age_s": self.policy_bundle_age_s,
             "detector_config_stale": self.detector_config_stale,
             "detector_config_age_s": self.detector_config_age_s,
+            "mode": self.mode,
+            "step_index": self.step_index,
+            "would_action_type": self.would_action_type,
+            "would_action_params": self.would_action_params,
+            "matched_branch": self.matched_branch,
         }
 
 

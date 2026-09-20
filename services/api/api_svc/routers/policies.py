@@ -6,6 +6,9 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from dunetrace.policies import (
+    DEFAULT_MODE,
+    DRY_RUN_MODE,
+    VALID_MODES,
     PolicyConfigError,
     VALID_OPERATORS,
     VALID_TRIGGERS,
@@ -22,6 +25,7 @@ from api_svc.db.queries import (
     update_policy,
     delete_policy,
     log_policy_audit,
+    fetch_dry_run_summary,
     fetch_policy_evaluations,
 )
 
@@ -75,6 +79,11 @@ class PolicyCreate(BaseModel):
     action: ActionModel
     priority: int = 100
     enabled: bool = True
+    #: "enforcing" (default) or "dry_run". Enforcing by default on purpose: a
+    #: policy someone took the trouble to create should guard something, and a
+    #: guardrail that quietly does nothing is the failure this engine is being
+    #: hardened against. Dry run is how you preview one, not how one arrives.
+    mode: str = DEFAULT_MODE
 
 
 class PolicyUpdate(BaseModel):
@@ -84,6 +93,10 @@ class PolicyUpdate(BaseModel):
     action: Optional[ActionModel] = None
     priority: Optional[int] = None
     enabled: Optional[bool] = None
+    #: Promotion is this field changing from "dry_run" to "enforcing". It is a
+    #: field update and nothing else, so the policy keeps its id and every
+    #: verdict already written against it stays attached and readable.
+    mode: Optional[str] = None
 
 
 def _check_prompt_injection(text: str) -> list:
@@ -93,7 +106,18 @@ def _check_prompt_injection(text: str) -> list:
     return [label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(text)]
 
 
-def _validate(condition: ConditionModel, action: ActionModel, name: str = "") -> None:
+def _validate(
+    condition: ConditionModel,
+    action: ActionModel,
+    name: str = "",
+    mode: Optional[str] = None,
+) -> None:
+    if mode is not None and mode not in VALID_MODES:
+        raise HTTPException(
+            422,
+            f"Invalid mode {mode!r}. Valid: {sorted(VALID_MODES)}. A policy is "
+            f"{DEFAULT_MODE!r} unless you ask for {DRY_RUN_MODE!r}.",
+        )
     if condition.trigger not in _VALID_TRIGGERS:
         raise HTTPException(
             422,
@@ -192,7 +216,7 @@ async def create(
     body: PolicyCreate,
     org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
-    _validate(body.condition, body.action, body.name)
+    _validate(body.condition, body.action, body.name, body.mode)
     row = await create_policy(
         org_id=org_id,
         name=body.name,
@@ -218,6 +242,34 @@ async def get_one(
     if row is None:
         raise HTTPException(404, f"Policy {policy_id} not found")
     return row
+
+
+@router.get(
+    "/{policy_id}/dry-run-summary",
+    response_model=Dict[str, Any],
+    summary="What a dry-run policy would have done",
+)
+async def get_dry_run_summary(
+    policy_id: int,
+    days: int = 14,
+    org_id: str = Depends(require_org),
+):
+    """Answers "is this policy correctly tuned" without opening anything else.
+
+    Every number is computed server-side. The dashboard's standing rule is that
+    a derived metric whose numerator and denominator come from different
+    populations is the bug that keeps recurring there, and a fire rate is
+    exactly that shape, so both halves come from one window and one agent.
+    """
+    if days < 1 or days > 90:
+        raise HTTPException(422, "days must be between 1 and 90")
+    policy = await get_policy_by_id(org_id, policy_id)
+    if not policy:
+        raise HTTPException(404, "Policy not found")
+    summary = await fetch_dry_run_summary(org_id, policy_id, days=days)
+    summary["policy_name"] = policy.get("name", "")
+    summary["mode"] = policy.get("mode", DEFAULT_MODE)
+    return summary
 
 
 @router.get(
@@ -250,7 +302,12 @@ async def update(
         raise HTTPException(404, f"Policy {policy_id} not found")
     effective_condition = body.condition or ConditionModel(**existing["condition"])
     effective_action = body.action or ActionModel(**existing["action"])
-    _validate(effective_condition, effective_action, body.name or existing.get("name", ""))
+    _validate(
+        effective_condition,
+        effective_action,
+        body.name or existing.get("name", ""),
+        body.mode,
+    )
     row = await update_policy(org_id, policy_id, body.model_dump(exclude_none=True))
     await log_policy_audit(policy_id, "updated", org_id, before=existing, after=row)
     return row

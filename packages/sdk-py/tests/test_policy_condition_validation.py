@@ -321,12 +321,15 @@ class TestKnownGoodCorpusStillRegisters(unittest.TestCase):
             "value": "send_customer_message",
             "match": {"or": [{"event.hour": {"lt": 9}}, {"event.hour": {"gte": 17}}]},
         },
-        # examples/policies/trial-tier-strict-limits.yaml — pure expression, no operator
+        # examples/policies/trial-tier-strict-limits.yaml — pure expression, no operator.
+        # Was an agent.tier/org.plan OR until those prefixes were rejected at
+        # registration for having no runtime source; the example now uses run.*,
+        # which fires. See validate_policy_semantics.
         {
             "trigger": "expression",
             "match": {
                 "run.tool_call_count": {"gt": 8},
-                "or": [{"agent.tier": {"eq": "trial"}}, {"org.plan": {"in": ["free", "starter"]}}],
+                "or": [{"run.error_count": {"gte": 2}}, {"run.cost_usd": {"gt": 5.0}}],
             },
         },
         # api_svc/fix_classification.py::build_suggested_policy — all four builders
