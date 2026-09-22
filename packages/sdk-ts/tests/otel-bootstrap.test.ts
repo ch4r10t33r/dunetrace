@@ -470,6 +470,35 @@ describe("Dunetrace client auto-wiring", () => {
     expect(memory.getFinishedSpans()[0].spanContext().traceId).toBe(traceId);
   });
 
+  it("shutdown honours its deadline even when the ingest drain has spent it and the collector is silent", async () => {
+    // The HTTP drain and the OTel flush share one budget. If the drain uses
+    // all of it, the OTel flush gets a zero budget and must not add the
+    // processor's own export timeout on top.
+    const stuck: SpanExporter = {
+      export: () => { /* never calls back */ },
+      shutdown: () => Promise.resolve(),
+      forceFlush: () => Promise.resolve(),
+    };
+    process.env.DUNETRACE_OTEL_ENABLED = "1";
+    process.env.DUNETRACE_OTEL_ENDPOINT = "http://collector:4318/v1/traces";
+    otel.init(undefined, { exporterFactory: () => stuck });
+
+    const budgetMs = 150;
+    const slowEmitter = {
+      // Each batch takes the whole budget to ship, so the drain loop exits on
+      // the deadline with the OTel flush owed nothing.
+      ship: () => new Promise<void>((r) => setTimeout(r, budgetMs)),
+    };
+    const dt = new Dunetrace({ emitter: slowEmitter, flushOnExit: false });
+    await dt.run("agent", { model: "gpt-4o" }, async (run) => { run.finalAnswer(); });
+
+    const t0 = Date.now();
+    await dt.shutdown(budgetMs);
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(budgetMs - 5);
+    expect(took).toBeLessThan(budgetMs * 3);
+  });
+
   it("the exit flush runs once per process, not once per client", async () => {
     const memory = new InMemorySpanExporter();
     process.env.DUNETRACE_OTEL_ENABLED = "1";
