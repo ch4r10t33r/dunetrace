@@ -233,6 +233,8 @@ export interface DunetraceOtelExporterOptions {
  * naturally sequential per run.
  */
 export class DunetraceOtelExporter {
+  /** See EventSink.exportsOtelSpans. */
+  readonly exportsOtelSpans = true;
   private readonly _tracer: Tracer;
   private readonly _captureContent: boolean;
   private readonly _runs = new Map<string, RunSpans>();

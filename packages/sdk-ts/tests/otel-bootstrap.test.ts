@@ -205,6 +205,39 @@ describe("buildTracerProvider / init", () => {
     expect(kept.getFinishedSpans().map((s) => s.name)).toEqual(["dunetrace.run"]);
   });
 
+  it("forceFlush returns at once when the budget is already spent", async () => {
+    const stuck: SpanExporter = {
+      export: () => { /* never calls back */ },
+      shutdown: () => Promise.resolve(),
+      forceFlush: () => Promise.resolve(),
+    };
+    otel.init(enabledConfig(), { exporterFactory: () => stuck });
+    otel.getTracer()!.startSpan("pending").end();
+    const t0 = Date.now();
+    await otel.forceFlush(0);
+    await otel.forceFlush(-5);
+    expect(Date.now() - t0).toBeLessThan(100);
+  });
+
+  it("warns once per process on a repeated misconfiguration", () => {
+    const lines: string[] = [];
+    const orig = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    try {
+      // Every client construction retries init(); an enabled-but-empty
+      // endpoint must not produce one line per client.
+      const cfg = otel.configFromEnv({ enabled: true }, {});
+      expect(otel.init(cfg)).toBe(false);
+      expect(otel.init(cfg)).toBe(false);
+      expect(otel.buildTracerProvider(enabledConfig(), { exporterFactory: () => { throw new Error("x"); } })).toBeNull();
+      expect(otel.buildTracerProvider(enabledConfig(), { exporterFactory: () => { throw new Error("x"); } })).toBeNull();
+    } finally {
+      process.stderr.write = orig;
+    }
+    expect(lines.filter((l) => l.includes("DUNETRACE_OTEL_ENDPOINT is empty"))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes("failed to initialize export pipeline"))).toHaveLength(1);
+  });
+
   it("forceFlush gives up after its timeout when the exporter never answers", async () => {
     const stuck: SpanExporter = {
       export: () => { /* never calls back */ },
@@ -404,9 +437,56 @@ describe("Dunetrace client auto-wiring", () => {
       flushOnExit: false,
       exporter: { handle: (e) => { handled.push(e.event_type); } },
     });
-    await dt.run("agent", { model: "gpt-4o" }, async (run) => { run.finalAnswer(); });
+    await dt.run("agent", { model: "gpt-4o" }, async (run) => {
+      // A sink that is not an OTel exporter gets no OTel correlation ids,
+      // even though export is enabled in the environment.
+      expect(run.otelTraceId).toBeNull();
+      expect(run.otelParentSpanId).toBeNull();
+      run.finalAnswer();
+    });
     await dt.shutdown();
     expect(handled).toEqual(["run.started", "run.completed"]);
     expect(memory.getFinishedSpans()).toHaveLength(0);
+  });
+
+  it("an explicit DunetraceOtelExporter on the caller's own tracer still gets the ids", async () => {
+    // No env, no bootstrap: the caller wired the exporter by hand.
+    const { BasicTracerProvider, SimpleSpanProcessor } = await import("@opentelemetry/sdk-trace-base");
+    const memory = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(memory)] });
+    const dt = new Dunetrace({
+      emitter: new NoopBatchEmitter(),
+      flushOnExit: false,
+      exporter: new otelIntegration.DunetraceOtelExporter({ tracer: provider.getTracer("mine") }),
+    });
+    expect(otel.isEnabled()).toBe(false);
+    let traceId = "";
+    await dt.run("agent", { model: "gpt-4o" }, async (run) => {
+      traceId = run.otelTraceId ?? "";
+      expect(traceId).toBe(run.runId.replace(/-/g, ""));
+      run.finalAnswer();
+    });
+    await dt.shutdown();
+    expect(memory.getFinishedSpans()[0].spanContext().traceId).toBe(traceId);
+  });
+
+  it("the exit flush runs once per process, not once per client", async () => {
+    const memory = new InMemorySpanExporter();
+    process.env.DUNETRACE_OTEL_ENABLED = "1";
+    process.env.DUNETRACE_OTEL_ENDPOINT = "http://collector:4318/v1/traces";
+    otel.init(undefined, { exporterFactory: () => memory });
+    const a = new Dunetrace({ emitter: new NoopBatchEmitter(), flushOnExit: false });
+    const b = new Dunetrace({ emitter: new NoopBatchEmitter(), flushOnExit: false });
+    await a.run("a", { model: "m" }, async (run) => { run.finalAnswer(); });
+    await b.run("b", { model: "m" }, async (run) => { run.finalAnswer(); });
+
+    await a._flushBeforeExit();
+    expect(memory.getFinishedSpans()).toHaveLength(2); // one flush covered both clients
+    otel.getTracer()!.startSpan("late").end();
+    await b._flushBeforeExit(); // must not start a second flush
+    await new Promise((r) => setTimeout(r, 20));
+    expect(memory.getFinishedSpans()).toHaveLength(2);
+    await a.shutdown();
+    await b.shutdown();
   });
 });

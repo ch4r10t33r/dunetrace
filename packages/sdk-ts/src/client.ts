@@ -90,10 +90,6 @@ export class Dunetrace {
    *  flush's own async work settles, and without this it would start a second
    *  flush on top of the first. */
   private _exitFlushing = false;
-  /** The OTel flush at exit runs once. Every forceFlush() is pending work that
-   *  makes Node fire `beforeExit` again once it settles, so flushing on each
-   *  pass would keep the process alive forever. */
-  private _otelExitFlushed = false;
 
   constructor(opts: ClientOptions = {}) {
     const base      = (opts.endpoint ?? "http://localhost:8001").replace(/\/$/, "");
@@ -152,7 +148,10 @@ export class Dunetrace {
     const tools   = opts.tools        ?? [];
     const version = agentVersion(opts.systemPrompt ?? "", model, tools);
     const run     = new DunetraceRun(agentId, version, this, opts.runId);
-    if (this._exporter) {
+    // Only a sink that actually produces OTel spans gets the correlation ids;
+    // an arbitrary EventSink would otherwise advertise a trace that exists
+    // nowhere.
+    if (this._exporter?.exportsOtelSpans === true) {
       run.otelTraceId      = traceIdHex(run.runId) || null;
       run.otelParentSpanId = rootSpanIdHex(run.runId) || null;
     }
@@ -459,11 +458,12 @@ export class Dunetrace {
   _flushBeforeExit(): Promise<void> {
     if (this._exitFlushing) return Promise.resolve();
     // The OTel batch processor has no exit hook of its own, so a short-lived
-    // process would otherwise leave its last spans in the queue. forceFlush is
-    // a no-op when export is off, never rejects, and is bounded by its own
-    // timeout so an unresponsive collector cannot hold the exit.
-    const spans = (!this._otelExitFlushed && otel.isEnabled()) ? otel.forceFlush() : null;
-    if (spans !== null) this._otelExitFlushed = true;
+    // process would otherwise leave its last spans in the queue. The provider
+    // is shared by every client, so otel.flushForExit() runs once per process
+    // and returns null afterwards: every flush is pending work that makes Node
+    // fire `beforeExit` again, and repeating it would keep the loop alive. It
+    // never rejects and is bounded, so a silent collector cannot hold the exit.
+    const spans = otel.flushForExit();
     if (this._buffer.length === 0 && spans === null) return Promise.resolve();
     this._exitFlushing = true;
     return Promise.all([this.flush().catch(() => {}), spans])

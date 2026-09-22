@@ -318,7 +318,9 @@ export function buildTracerProvider(
 ): BasicTracerProvider | null {
   if (!config.enabled) return null;
   if (!config.endpoint) {
-    warn("DUNETRACE_OTEL_ENABLED is set but DUNETRACE_OTEL_ENDPOINT is empty; OTel export disabled.");
+    // Once per process: every client construction retries init(), and a
+    // misconfigured deployment should not repeat this line for each one.
+    warnOnce("DUNETRACE_OTEL_ENABLED is set but DUNETRACE_OTEL_ENDPOINT is empty; OTel export disabled.");
     return null;
   }
   let sdk: typeof import("@opentelemetry/sdk-trace-base");
@@ -362,7 +364,7 @@ export function buildTracerProvider(
     });
     return provider;
   } catch (err) {
-    warn(`failed to initialize export pipeline (${String(err)}); OTel export disabled.`);
+    warnOnce(`failed to initialize export pipeline (${String(err)}); OTel export disabled.`);
     return null;
   }
 }
@@ -377,6 +379,8 @@ export function buildTracerProvider(
 let _provider: BasicTracerProvider | null = null;
 let _tracer: Tracer | null = null;
 let _config: OtelConfig | null = null;
+/** Set once flushForExit() has run for the current provider. */
+let _exitFlushed = false;
 
 /**
  * Idempotent bootstrap of the process-global tracer. Returns true when OTel
@@ -400,6 +404,7 @@ export function init(config?: OtelConfig, opts: InitOptions = {}): boolean {
   _provider = provider;
   _tracer = provider.getTracer(DEFAULT_SERVICE_NAME, cfg.serviceVersion);
   _config = cfg;
+  _exitFlushed = false;
   return true;
 }
 
@@ -433,7 +438,8 @@ export function forceFlush(timeoutMs = EXPORT_TIMEOUT_MS): Promise<void> {
   const provider = _provider;
   if (provider === null) return Promise.resolve();
   const flush = provider.forceFlush().catch(() => undefined);
-  if (!(timeoutMs > 0)) return flush;
+  // No budget left: the flush is started, but the caller does not wait on it.
+  if (!(timeoutMs > 0)) return Promise.resolve();
   let timer: ReturnType<typeof setTimeout> | null = null;
   const deadline = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, timeoutMs);
@@ -444,12 +450,28 @@ export function forceFlush(timeoutMs = EXPORT_TIMEOUT_MS): Promise<void> {
   });
 }
 
+/**
+ * The flush the client runs from Node's `beforeExit`, once per process.
+ *
+ * The provider is shared by every client in the process, so this is one
+ * flush for all of them, not one per client: a flush is pending work that
+ * fires `beforeExit` again, and a second client repeating it would only add
+ * another bounded wait. Returns null when export is off or the flush has
+ * already run, so the caller can tell whether it started anything.
+ */
+export function flushForExit(): Promise<void> | null {
+  if (_provider === null || _exitFlushed) return null;
+  _exitFlushed = true;
+  return forceFlush();
+}
+
 /** Flush and tear down the export pipeline. Safe to call when disabled. */
 export function shutdown(): Promise<void> {
   const provider = _provider;
   _provider = null;
   _tracer = null;
   _config = null;
+  _exitFlushed = false;
   if (provider === null) return Promise.resolve();
   return provider.shutdown().catch(() => undefined);
 }
@@ -488,6 +510,7 @@ export function _resetForTests(exporterModule: ExporterModule | null = null): vo
   _provider = null;
   _tracer = null;
   _config = null;
+  _exitFlushed = false;
   _warned.clear();
   _exporterModule = exporterModule;
 }
