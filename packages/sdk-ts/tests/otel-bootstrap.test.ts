@@ -15,6 +15,7 @@ import * as otel from "../src/otel.js";
 import * as otelIntegration from "../src/integrations/otel.js";
 import { Dunetrace } from "../src/client.js";
 import { NoopBatchEmitter } from "../src/emitters.js";
+import type { AgentEvent, EventType } from "../src/models.js";
 
 const ENV_KEYS = [
   "DUNETRACE_OTEL_ENABLED",
@@ -50,6 +51,15 @@ afterEach(async () => {
 
 function enabledConfig(overrides: Partial<otel.OtelConfig> = {}): otel.OtelConfig {
   return otel.configFromEnv({ enabled: true, endpoint: "http://collector:4318/v1/traces", ...overrides }, {});
+}
+
+const RUN_ID = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
+let clock = 1_700_000_000;
+
+/** An AgentEvent for RUN_ID, timestamps advancing so spans have durations. */
+function runEvent(type: EventType, payload: Record<string, unknown>): AgentEvent {
+  clock += 0.5;
+  return { event_type: type, run_id: RUN_ID, agent_id: "agent", agent_version: "v1", step_index: 1, timestamp: clock, payload };
 }
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -159,18 +169,64 @@ describe("buildTracerProvider / init", () => {
     expect(otel.isEnabled()).toBe(true);
   });
 
-  it("stamps service, version, and org on the resource and honours the sampling ratio", async () => {
+  it("stamps service, version, and org on the resource", () => {
     const memory = new InMemorySpanExporter();
-    otel.init(enabledConfig({ orgId: "org-9", serviceName: "svc", samplingRatio: 0 }), { exporterFactory: () => memory });
+    otel.init(enabledConfig({ orgId: "org-9", serviceName: "svc" }), { exporterFactory: () => memory });
     const attrs = otel.getTracerProvider()!.resource.attributes;
     expect(attrs["service.name"]).toBe("svc");
     expect(attrs["dunetrace.org_id"]).toBe("org-9");
     expect(String(attrs["service.version"])).toMatch(/^\d+\.\d+\.\d+/);
+  });
 
-    // Ratio 0 means every root span is sampled out and never reaches the exporter.
-    otel.getTracer()!.startSpan("dropped").end();
+  it("applies the sampling ratio to run spans, whose synthetic parent is already flagged sampled", async () => {
+    // A dunetrace.run span starts under a remote parent context that carries
+    // TraceFlags.SAMPLED. A parent-based sampler would honour that flag and
+    // never consult the ratio, so the check has to go through the exporter,
+    // not a bare tracer.startSpan().
+    const memory = new InMemorySpanExporter();
+    otel.init(enabledConfig({ samplingRatio: 0 }), { exporterFactory: () => memory });
+    const sink = otel.createEventSink()!;
+    sink.handle(runEvent("run.started", { model: "gpt-4o", tools: [] }));
+    sink.handle(runEvent("tool.called", { tool_name: "lookup", args: "{}" }));
+    sink.handle(runEvent("tool.responded", { tool_name: "lookup", success: true }));
+    sink.handle(runEvent("run.completed", { total_steps: 1, exit_reason: "final_answer", tool_call_count: 1 }));
     await otel.forceFlush();
     expect(memory.getFinishedSpans()).toHaveLength(0);
+
+    // Ratio 1 keeps the whole trace.
+    await otel.shutdown();
+    otel._resetForTests(otelIntegration);
+    const kept = new InMemorySpanExporter();
+    otel.init(enabledConfig({ samplingRatio: 1 }), { exporterFactory: () => kept });
+    const sink2 = otel.createEventSink()!;
+    sink2.handle(runEvent("run.started", { model: "gpt-4o", tools: [] }));
+    sink2.handle(runEvent("run.completed", { total_steps: 0, exit_reason: "final_answer", tool_call_count: 0 }));
+    await otel.forceFlush();
+    expect(kept.getFinishedSpans().map((s) => s.name)).toEqual(["dunetrace.run"]);
+  });
+
+  it("forceFlush gives up after its timeout when the exporter never answers", async () => {
+    const stuck: SpanExporter = {
+      export: () => { /* never calls back */ },
+      shutdown: () => Promise.resolve(),
+      forceFlush: () => Promise.resolve(),
+    };
+    otel.init(enabledConfig(), { exporterFactory: () => stuck });
+    otel.getTracer()!.startSpan("pending").end();
+    const t0 = Date.now();
+    await otel.forceFlush(50);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it("tears the pipeline down when the event sink cannot be built", () => {
+    otel._resetForTests({
+      DunetraceOtelExporter: class { constructor() { throw new Error("no sink"); } } as never,
+    });
+    otel.init(enabledConfig(), { exporterFactory: () => new InMemorySpanExporter() });
+    expect(otel.isEnabled()).toBe(true);
+    expect(otel.createEventSink()).toBeNull();
+    expect(otel.isEnabled()).toBe(false);
+    expect(otel.getTracerProvider()).toBeNull();
   });
 
   it("forceFlush delivers queued spans; shutdown clears state and is safe to repeat", async () => {
@@ -211,20 +267,20 @@ function attempt(breaker: otel.CircuitBreakerExporter): ExportResult {
 }
 
 describe("CircuitBreakerExporter", () => {
-  let clock = 0;
-  const now = () => clock;
-  beforeEach(() => { clock = 1_000_000; });
+  let tick = 0;
+  const now = () => tick;
+  beforeEach(() => { tick = 1_000_000; });
 
   it("opens after the failure threshold and stops calling the exporter", () => {
     const inner = new ScriptedExporter(() => ({ code: ExportResultCode.FAILED, error: new Error("refused") }));
     const breaker = new otel.CircuitBreakerExporter(inner, now);
     for (let i = 0; i < otel.CircuitBreakerExporter.FAILURE_THRESHOLD; i++) {
-      clock += 1000;
+      tick += 1000;
       expect(attempt(breaker).code).toBe(ExportResultCode.FAILED);
     }
     expect(breaker.isOpen()).toBe(true);
     const callsAtTrip = inner.calls;
-    clock += 1000;
+    tick += 1000;
     expect(attempt(breaker).code).toBe(ExportResultCode.FAILED);
     expect(inner.calls).toBe(callsAtTrip); // dropped without touching the exporter
   });
@@ -236,7 +292,7 @@ describe("CircuitBreakerExporter", () => {
     for (let i = 0; i < otel.CircuitBreakerExporter.FAILURE_THRESHOLD; i++) attempt(breaker);
     expect(breaker.isOpen()).toBe(true);
 
-    clock += otel.CircuitBreakerExporter.COOLDOWN_MS + 1;
+    tick += otel.CircuitBreakerExporter.COOLDOWN_MS + 1;
     fail = false;
     expect(breaker.isOpen()).toBe(false);
     expect(attempt(breaker).code).toBe(ExportResultCode.SUCCESS);
@@ -250,7 +306,7 @@ describe("CircuitBreakerExporter", () => {
     const inner = new ScriptedExporter(() => ({ code: ExportResultCode.FAILED }));
     const breaker = new otel.CircuitBreakerExporter(inner, now);
     for (let i = 0; i < otel.CircuitBreakerExporter.FAILURE_THRESHOLD - 1; i++) attempt(breaker);
-    clock += otel.CircuitBreakerExporter.WINDOW_MS + 1; // the earlier failures age out
+    tick += otel.CircuitBreakerExporter.WINDOW_MS + 1; // the earlier failures age out
     attempt(breaker);
     expect(breaker.isOpen()).toBe(false);
   });
@@ -271,7 +327,7 @@ describe("Dunetrace client auto-wiring", () => {
     const dt = new Dunetrace({ emitter: new NoopBatchEmitter(), flushOnExit: false });
     await dt.run("agent", { model: "gpt-4o" }, async (run) => {
       expect(run.otelTraceId).toBeNull();
-      expect(run.otelSpanId).toBeNull();
+      expect(run.otelParentSpanId).toBeNull();
     });
     await dt.shutdown();
   });
@@ -289,7 +345,7 @@ describe("Dunetrace client auto-wiring", () => {
     await dt.run("billing-agent", { model: "gpt-4o" }, async (run) => {
       runId = run.runId;
       expect(run.otelTraceId).toBe(runId.replace(/-/g, ""));
-      expect(run.otelSpanId).toBe(run.otelTraceId!.slice(16));
+      expect(run.otelParentSpanId).toBe(run.otelTraceId!.slice(16));
       run.toolCalled("lookup", { url: "https://crm.internal/acct/42" });
       run.toolResponded("lookup", true, 12, 8);
       run.finalAnswer();
@@ -301,6 +357,10 @@ describe("Dunetrace client auto-wiring", () => {
     expect(names).toEqual(["dunetrace.run", "dunetrace.tool.lookup"]);
     const root = spans.find((s) => s.name === "dunetrace.run")!;
     expect(root.spanContext().traceId).toBe(runId.replace(/-/g, ""));
+    // The run span's own id is SDK-assigned; what the run carries is the id of
+    // the synthetic parent it hangs under, which is how a backend finds it.
+    expect(root.parentSpanId).toBe(runId.replace(/-/g, "").slice(16));
+    expect(root.spanContext().spanId).not.toBe(root.parentSpanId);
     // captureContent=false came through from env: no URL on the tool span.
     const tool = spans.find((s) => s.name === "dunetrace.tool.lookup")!;
     expect(tool.attributes["url.full"]).toBeUndefined();
@@ -317,16 +377,16 @@ describe("Dunetrace client auto-wiring", () => {
     await dt.run("agent", { model: "gpt-4o" }, async (run) => { run.finalAnswer(); });
     expect(memory.getFinishedSpans()).toHaveLength(0); // sitting in the batch queue
 
-    // First beforeExit pass: flushes the OTel queue.
-    dt._flushBeforeExit();
-    await otel.forceFlush(); // settle the in-flight flush
+    // First beforeExit pass: flushes the OTel queue. Await the flush it
+    // started, and nothing else, so the assertion is about that flush alone.
+    await dt._flushBeforeExit();
     expect(memory.getFinishedSpans().map((s) => s.name)).toEqual(["dunetrace.run"]);
 
     // Later passes must schedule nothing, or Node would never exit. The only
     // observable is that a second call returns without touching the exporter:
     // a new span left in the queue stays there.
     otel.getTracer()!.startSpan("after-exit").end();
-    dt._flushBeforeExit();
+    await dt._flushBeforeExit();
     await new Promise((r) => setTimeout(r, 20));
     expect(memory.getFinishedSpans().map((s) => s.name)).toEqual(["dunetrace.run"]);
     await dt.shutdown();

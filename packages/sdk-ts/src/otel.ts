@@ -53,6 +53,12 @@ const VALID_PROTOCOLS = ["grpc", "http/protobuf"] as const;
  *  the agent to wait on a slow collector. Same limits as the Python SDK. */
 const MAX_QUEUE_SIZE = 2048;
 const MAX_EXPORT_BATCH_SIZE = 512;
+/** Upper bound on one export attempt, applied to the batch processor and to
+ *  the OTLP exporter's own request. The OpenTelemetry defaults are 30s and 10s,
+ *  which is how long a collector that accepts the connection and never answers
+ *  would hold shutdown() or the exit flush: the pending request keeps the event
+ *  loop alive until the exporter gives up. forceFlush() is bounded separately. */
+const EXPORT_TIMEOUT_MS = 5_000;
 
 // ExportResultCode from @opentelemetry/core. Spelled out here so this module
 // does not import the package at load time; a test pins them to the enum.
@@ -83,7 +89,9 @@ export type ExporterFactory = (config: OtelConfig) => SpanExporter;
 
 export interface InitOptions {
   exporterFactory?: ExporterFactory;
-  /** Clock for the circuit breaker, in milliseconds. Tests drive it. */
+  /** Clock for the circuit breaker, in milliseconds. Monotonic by default
+   *  (performance.now), so a wall-clock step cannot hold the circuit open or
+   *  close it early. Tests drive it. */
   now?: () => number;
 }
 
@@ -199,7 +207,7 @@ export class CircuitBreakerExporter implements SpanExporter {
   private _openUntil = 0;
   private _lastWarn = 0;
 
-  constructor(wrapped: SpanExporter, now: () => number = () => Date.now()) {
+  constructor(wrapped: SpanExporter, now: () => number = () => performance.now()) {
     this._wrapped = wrapped;
     this._now = now;
   }
@@ -283,7 +291,7 @@ function buildSpanExporter(config: OtelConfig): SpanExporter {
   if (config.protocol === "http/protobuf") {
     const { OTLPTraceExporter } = require("@opentelemetry/exporter-trace-otlp-proto") as
       typeof import("@opentelemetry/exporter-trace-otlp-proto");
-    return new OTLPTraceExporter({ url: config.endpoint, headers: config.headers });
+    return new OTLPTraceExporter({ url: config.endpoint, headers: config.headers, timeoutMillis: EXPORT_TIMEOUT_MS });
   }
   const { OTLPTraceExporter } = require("@opentelemetry/exporter-trace-otlp-grpc") as
     typeof import("@opentelemetry/exporter-trace-otlp-grpc");
@@ -295,7 +303,7 @@ function buildSpanExporter(config: OtelConfig): SpanExporter {
     metadata = new Metadata();
     for (const [key, value] of Object.entries(config.headers)) metadata.set(key, value);
   }
-  return new OTLPTraceExporter({ url: config.endpoint, metadata });
+  return new OTLPTraceExporter({ url: config.endpoint, metadata, timeoutMillis: EXPORT_TIMEOUT_MS });
 }
 
 /**
@@ -335,13 +343,20 @@ export function buildTracerProvider(
       "service.version": config.serviceVersion,
     };
     if (config.orgId) attrs["dunetrace.org_id"] = config.orgId;
+    // TraceIdRatioBasedSampler on its own, deliberately not wrapped in
+    // ParentBasedSampler. Every dunetrace.run span is started under a synthetic
+    // remote parent that already carries the sampled flag (see
+    // integrations/otel.ts), and ParentBasedSampler would honour that flag and
+    // never consult the ratio. The ratio sampler decides from the trace id
+    // alone, so a run's whole trace is still kept or dropped together.
     const provider = new sdk.BasicTracerProvider({
       resource: resources.Resource.default().merge(new resources.Resource(attrs)),
-      sampler: new sdk.ParentBasedSampler({ root: new sdk.TraceIdRatioBasedSampler(config.samplingRatio) }),
+      sampler: new sdk.TraceIdRatioBasedSampler(config.samplingRatio),
       spanProcessors: [
         new sdk.BatchSpanProcessor(exporter, {
           maxQueueSize: MAX_QUEUE_SIZE,
           maxExportBatchSize: MAX_EXPORT_BATCH_SIZE,
+          exportTimeoutMillis: EXPORT_TIMEOUT_MS,
         }),
       ],
     });
@@ -408,12 +423,25 @@ export function getTracerProvider(): BasicTracerProvider | null {
   return _provider;
 }
 
-/** Push buffered spans to the collector now. Safe to call when disabled and
- *  never rejects; the client calls it from shutdown() and before exit. */
-export function forceFlush(): Promise<void> {
+/** Push buffered spans to the collector now, waiting at most `timeoutMs`.
+ *  Safe to call when disabled and never rejects; the client calls it from
+ *  shutdown() and before exit. The wait is bounded because a collector that
+ *  accepts the connection and never answers would otherwise hold the caller
+ *  for the full export timeout. The timer is unref'd so the bound itself never
+ *  keeps the process alive. */
+export function forceFlush(timeoutMs = EXPORT_TIMEOUT_MS): Promise<void> {
   const provider = _provider;
   if (provider === null) return Promise.resolve();
-  return provider.forceFlush().catch(() => undefined);
+  const flush = provider.forceFlush().catch(() => undefined);
+  if (!(timeoutMs > 0)) return flush;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+  });
+  return Promise.race([flush, deadline]).finally(() => {
+    if (timer !== null) clearTimeout(timer);
+  });
 }
 
 /** Flush and tear down the export pipeline. Safe to call when disabled. */
@@ -440,7 +468,10 @@ export function createEventSink(): EventSink | null {
       captureContent: _config?.captureContent ?? true,
     });
   } catch (err) {
+    // Without a sink the tracer has no producer, so leaving it up would only
+    // make isEnabled() report an export that never happens.
     warn(`exporter init failed (${String(err)}); OTel export disabled.`);
+    void shutdown();
     return null;
   }
 }

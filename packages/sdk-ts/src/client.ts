@@ -65,7 +65,7 @@ function _installExitFlushHook(): void {
   _exitHookInstalled = true;
   process.on("beforeExit", () => {
     for (const ref of _liveClients) {
-      ref.deref()?._flushBeforeExit();
+      void ref.deref()?._flushBeforeExit();
     }
   });
 }
@@ -153,8 +153,8 @@ export class Dunetrace {
     const version = agentVersion(opts.systemPrompt ?? "", model, tools);
     const run     = new DunetraceRun(agentId, version, this, opts.runId);
     if (this._exporter) {
-      run.otelTraceId = traceIdHex(run.runId) || null;
-      run.otelSpanId  = rootSpanIdHex(run.runId) || null;
+      run.otelTraceId      = traceIdHex(run.runId) || null;
+      run.otelParentSpanId = rootSpanIdHex(run.runId) || null;
     }
 
     // Auto-thread parent_run_id: if this run opens while another run is already
@@ -384,10 +384,11 @@ export class Dunetrace {
     while (this._buffer.length > 0 && Date.now() < deadline) {
       await this.flush();
     }
-    // Push any spans still sitting in the OTel batch processor. The pipeline
-    // itself stays up (another client may share it); otel.shutdown() tears it
-    // down. A no-op when export is off.
-    await otel.forceFlush();
+    // Push any spans still sitting in the OTel batch processor, within
+    // whatever is left of the caller's deadline. The pipeline itself stays up
+    // (another client may share it); otel.shutdown() tears it down. A no-op
+    // when export is off.
+    await otel.forceFlush(Math.max(0, deadline - Date.now()));
   }
 
   // ── Internal ───────────────────────────────────────────────────────────────
@@ -455,16 +456,18 @@ export class Dunetrace {
    *
    * @internal — public only because the module-level listener calls it.
    */
-  _flushBeforeExit(): void {
-    if (this._exitFlushing) return;
+  _flushBeforeExit(): Promise<void> {
+    if (this._exitFlushing) return Promise.resolve();
     // The OTel batch processor has no exit hook of its own, so a short-lived
     // process would otherwise leave its last spans in the queue. forceFlush is
-    // a no-op when export is off and never rejects.
+    // a no-op when export is off, never rejects, and is bounded by its own
+    // timeout so an unresponsive collector cannot hold the exit.
     const spans = (!this._otelExitFlushed && otel.isEnabled()) ? otel.forceFlush() : null;
     if (spans !== null) this._otelExitFlushed = true;
-    if (this._buffer.length === 0 && spans === null) return;
+    if (this._buffer.length === 0 && spans === null) return Promise.resolve();
     this._exitFlushing = true;
-    void Promise.all([this.flush().catch(() => {}), spans])
+    return Promise.all([this.flush().catch(() => {}), spans])
+      .then(() => undefined)
       .finally(() => { this._exitFlushing = false; });
   }
 
