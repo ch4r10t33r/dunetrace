@@ -37,6 +37,11 @@ function omitLlmOutputText(): boolean {
 
 export class DunetraceRun {
   readonly runId: string;
+  /** OTel correlation ids, deterministic from runId, so a customer can jump
+   *  from an OTel backend to the Dunetrace run and back. Set by the client
+   *  only when OTel export is active; null otherwise. Mirrors the Python SDK. */
+  otelTraceId: string | null = null;
+  otelSpanId:  string | null = null;
 
   private _agentId:    string;
   private _version:    string;
