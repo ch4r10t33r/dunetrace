@@ -169,6 +169,28 @@ await dt.run("my-agent", { userInput: prompt, model: "gpt-4o" }, async (run) => 
 
 See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, Next.js, and `traceGenerateText`. Requires the `ai` package (`npm install ai`).
 
+## OpenTelemetry export
+
+Opt-in, env-driven, and additive to the normal ingest path:
+
+```bash
+npm install @opentelemetry/api @opentelemetry/sdk-trace-base @opentelemetry/resources \
+  @opentelemetry/exporter-trace-otlp-grpc   # or exporter-trace-otlp-proto
+
+export DUNETRACE_OTEL_ENABLED=1
+export DUNETRACE_OTEL_ENDPOINT=http://localhost:4317
+```
+
+`new Dunetrace()` builds the export pipeline when these are set and stamps each
+run with `run.otelTraceId` and `run.otelSpanId` so you can jump between the
+backend and the Dunetrace dashboard. Export runs on a batch processor with a
+bounded queue and a circuit breaker, so a dead collector never touches the
+agent. To use a tracer you already have, pass
+`new DunetraceOtelExporter({ tracer })` from `dunetrace/integrations/otel` as
+the `exporter` option. `dt.shutdown()` flushes pending spans;
+`otel.shutdown()` from the package root tears the pipeline down. All variables
+are listed in [docs/integrations/opentelemetry.md](../../docs/integrations/opentelemetry.md).
+
 ## Output modes
 
 | Mode | How to enable | Destination |

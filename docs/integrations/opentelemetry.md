@@ -29,6 +29,26 @@ That is the whole change. The SDK reads these at startup and, when enabled,
 builds an OTLP exporter on a background pipeline. Your existing `dt.run(...)`,
 `@dt.agent`, and `auto_instrument()` code is untouched.
 
+The TypeScript SDK reads the same variables. Install the OpenTelemetry
+packages next to `dunetrace` and set the same two env vars:
+
+```bash
+npm install @opentelemetry/api @opentelemetry/sdk-trace-base @opentelemetry/resources \
+  @opentelemetry/exporter-trace-otlp-grpc   # or exporter-trace-otlp-proto
+
+export DUNETRACE_OTEL_ENABLED=1
+export DUNETRACE_OTEL_ENDPOINT=http://localhost:4317
+```
+
+`new Dunetrace()` then builds the pipeline itself and every run, LLM call, tool
+call and retrieval becomes a span. Only the exporter package for the protocol
+you use is needed. If you already run your own OpenTelemetry setup, pass a
+`DunetraceOtelExporter` built on your tracer as the `exporter` option instead;
+an explicit exporter always wins over the env bootstrap. The Node batch
+processor has no exit hook, so call `await dt.shutdown()` before a short-lived
+process ends, or rely on the SDK's own exit flush, which pushes the last spans
+too. `otel.shutdown()` from the package root tears the pipeline down.
+
 ### Configuration
 
 All config is env-driven. Nothing here is required except enabling export and
@@ -143,8 +163,10 @@ a dead or slow collector is not retried on every batch. A missing
 **Nothing shows up.** Confirm `DUNETRACE_OTEL_ENABLED` and
 `DUNETRACE_OTEL_ENDPOINT` are set in the process actually running the agent. Turn
 on `logging.getLogger("dunetrace.otel").setLevel(logging.DEBUG)` to see whether
-the provider built. A quick check: point at a local collector with a debug
-exporter (see `otel/` in the repo) and watch the spans print.
+the provider built. In TypeScript, `otel.isEnabled()` from the package root
+answers the same question, and a missing package is reported once on stderr
+with the install command. A quick check: point at a local collector with a
+debug exporter (see `otel/` in the repo) and watch the spans print.
 
 **Connection refused on gRPC.** For a plaintext local collector, set
 `OTEL_EXPORTER_OTLP_INSECURE=true`, or use `DUNETRACE_OTEL_PROTOCOL=http/protobuf`
